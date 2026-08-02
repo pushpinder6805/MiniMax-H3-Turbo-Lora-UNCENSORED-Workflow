@@ -183,7 +183,26 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames):
         return handle.get_tensor("prompt_embeds"), handle.get_tensor("text_token_tags"), metadata, plan
 
 
-@spaces.GPU(duration=GPU_DURATION, size=GPU_SIZE)
+
+
+# Fitted on live probes (5 configs spanning canvas, duration and steps; max residual 3.7 s):
+# gpu_seconds = A + B * steps * tokens + C * steps * tokens^2, where tokens is the packed video row count.
+# PLACEMENT_ALLOWANCE covers the one-time 72 GiB lazy .to("cuda") a cold worker pays inside its first call.
+_DUR_A, _DUR_B, _DUR_C = -6.023, 2.0877e-4, 2.1221e-9
+_PLACEMENT_ALLOWANCE, _PAD = 90, 10
+
+
+def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
+    latent_frames = (int(num_frames) - 5) // 17 * 5 + 2
+    patches = (int(height) // 32) * (int(width) // 32)
+    tokens = latent_frames * patches
+    tokens += (int(image is not None) + int(last_image is not None)) * patches
+    st = int(steps) * tokens
+    compute = _DUR_A + _DUR_B * st + _DUR_C * st * tokens
+    return max(60, int(compute) + _PLACEMENT_ALLOWANCE + _PAD)
+
+
+@spaces.GPU(duration=get_duration, size=GPU_SIZE)
 def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed):
     """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
 
