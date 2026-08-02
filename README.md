@@ -6,7 +6,7 @@ colorTo: indigo
 sdk: gradio
 sdk_version: 6.20.0
 app_file: app.py
-pinned: false
+pinned: true
 short_description: Video generation with a synchronized soundtrack
 suggested_hardware: zero-a10g
 ---
