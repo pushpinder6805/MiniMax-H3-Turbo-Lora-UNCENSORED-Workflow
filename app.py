@@ -375,7 +375,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
             run = gr.Button("Generate", variant="primary")
             with gr.Accordion("Advanced options", open=False):
                 canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
-                duration = gr.Slider(label="Duration (s)", minimum=5, maximum=MAX_UI_DURATION, step=1, value=5)
+                duration = gr.Slider(label="Duration (s)", minimum=2, maximum=MAX_UI_DURATION, step=1, value=5)
                 steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
                 seed = gr.Number(label="Seed", value=42, precision=0)
             
