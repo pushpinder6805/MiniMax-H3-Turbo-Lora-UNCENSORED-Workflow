@@ -328,10 +328,7 @@ INTRO = """# MiniMax-H3
 </div>
 
 **MiniMax-H3** is a 33B parameter state of the art video generation model that produces video and a
-fully synchronized soundtrack (ambience, foley, speech) **jointly, in a single denoising pass** rather than
-dubbing audio onto silent footage. One packed token sequence carries text, image conditioning, audio and video
-through a shared transformer. Guidance is distilled into the weights, so every step counts. 24 fps, up to 15 s,
-with optional first and last keyframes.
+fully synchronized soundtrack (ambience, foley, speech).
 """
 
 CSS = """
