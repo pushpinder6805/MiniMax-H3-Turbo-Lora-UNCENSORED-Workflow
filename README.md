@@ -70,25 +70,29 @@ it resolved so this Space pins the same canvas rather than re-deriving it.
 
 ## Nothing is paid for with GPU time
 
-Download, load and the move onto the card happen at **startup**: `import spaces` at module top patches `torch.cuda`
-before any GPU is attached, and these are plain bfloat16 tensors, so ZeroGPU's startup packing handles them (it is a
-torchao `Float8Tensor` that cannot be packed, and there is none here). The conditioner round trip is a network call
-on this Space's CPU. A `@spaces.GPU` call is therefore only the denoise loop and the two decoders.
+The 77.3 GB download and the load happen at **startup**: `import spaces` at module top patches `torch.cuda` before
+any GPU is attached, so nothing about the load needs a card. The conditioner round trip is a network call on this
+Space's CPU. A `@spaces.GPU` call is therefore only the placement (once) and the denoise loop and the two decoders.
 
-### The 150 GB quota, not the 95 GiB card, is what limits startup placement
+### The 150 GB quota, not the 95 GiB card, is what rules out startup placement
 
-`spaces`' startup `torch.pack()` writes every startup-resident CUDA tensor to a **second copy on disk**, and only
-deletes the downloaded originals afterwards (`Cleaned 62.13GB of tensor files ... after packing`). Moving all
-77.3 GB onto the card therefore needs 154.6 GB at once, and the Space is evicted mid-pack:
+One thing does *not* happen at startup: the move onto the card. `spaces`' startup `torch.pack()` writes every
+startup-resident CUDA tensor to a **second copy on disk** and only deletes the downloaded originals afterwards
+(`Cleaned 62.13GB of tensor files ... after packing`, which is what keeps the conditioner half comfortable at
+66.7 GB). Packing 77.3 GB needs 154.6 GB at once, and this Space is evicted mid-pack:
 
 ```
 ZeroGPU tensors packing:   0%|          | 0.00/77.3G
-OSError: [Errno 28] No space left on device      # os.posix_fallocate in spaces/zero/torch/packing.py
+OSError: [Errno 28] No space left on device      # os.posix_fallocate, spaces/zero/torch/packing.py
 ```
 
-So only the transformer is preplaced — a 66.3 GB pack — and `app.py` unlinks the downloaded shards itself *before*
-`launch()` rather than after, which `.to("cuda")` has already made unreferenced. The autoencoders stay on the host
-and cross PCIe on the first request, 10.43 GiB and a no-op on every request after it.
+Unlinking the shards first does not rescue it. `.to("cuda")` under the startup patch does not release the
+memory-mapped safetensors, so nothing is freed — and the pack's own cleanup walks those still-open mappings and
+`lstat`s them, so a deleted blob becomes `FileNotFoundError: .../blobs/3d449... (deleted)`.
+
+Placement therefore happens on the **first GPU call**, `PIPE.to("cuda")` at the top of the `@spaces.GPU` function:
+about 10 s of PCIe once, then a no-op walk, and the denoise loop runs with everything resident and no offloading at
+all. It is the same trick the 4 bit Space uses, for the same reason.
 
 ## Generation constraints
 
@@ -104,7 +108,7 @@ resident:
 | | |
 |---|---|
 | `load_components` (77.3 GB, warm Xet) | 43 s |
-| `.to("cuda")` | 10 s |
+| `.to("cuda")`, once | 10 s |
 | resident weights | 72.16 GiB |
 | denoise + decode | 317 s, **10.58 s/step** |
 | peak allocated / reserved | 78.54 / 85.37 GiB |
@@ -115,7 +119,7 @@ resident:
 | Variable | Default | Meaning |
 |---|---|---|
 | `H3_CONDITIONER` | `diffusers-internal-dev/minimax-h3-conditioner` | The Space this one asks for embeddings. |
-| `H3_PLACEMENT` | `preplace` | `preplace` puts the transformer on the card at startup and the autoencoders on the first request; `offload` hands placement to `ComponentsManager.enable_auto_cpu_offload`. |
+| `H3_PLACEMENT` | `lazy` | `lazy` moves all 72.16 GiB onto the card on the first GPU call and leaves it there; `offload` hands placement to `ComponentsManager.enable_auto_cpu_offload` instead. |
 | `H3_ATTENTION` | `_native_cudnn` | cuDNN's fused kernel, 10–20% faster than the SDPA default and needs nothing installed. flash-attention 3 is sm90-only and this pool is sm120. |
 | `H3_GPU_DURATION` | `900` | Seconds per request; the pool applies a 1.5 duration factor. |
 | `H3_GPU_SIZE` | `xlarge` | ZeroGPU allocation size. `large` does not fit. |
