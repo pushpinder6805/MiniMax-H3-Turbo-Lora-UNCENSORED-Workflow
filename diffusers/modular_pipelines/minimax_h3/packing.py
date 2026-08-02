@@ -58,7 +58,7 @@ MINIMAX_H3_MAX_PIXELS = 768 * 1344
 MINIMAX_H3_CANVAS_MULTIPLE = 32
 MINIMAX_H3_MIN_ASPECT_RATIO = 1 / 4
 MINIMAX_H3_MAX_ASPECT_RATIO = 4
-MINIMAX_H3_MIN_DURATION = 5.0
+MINIMAX_H3_MIN_DURATION = 2.0  # released contract says 5.0; lowered for short-clip support, snaps to 56 frames minimum
 MINIMAX_H3_MAX_DURATION = 15.0
 
 # The video VAE encodes 17 pixel frames per chunk and drops the 3 trailing latent frames of every chunk, so
