@@ -1,5 +1,5 @@
 ---
-title: MiniMax-H3 (split, bf16)
+title: MiniMax H3
 emoji: 🎬
 colorFrom: purple
 colorTo: indigo
