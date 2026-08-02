@@ -1,0 +1,25 @@
+# `diffusers` itself is not installed: the MiniMax-H3 integration branch's `src/diffusers` tree is vendored into this
+# Space as a top-level `diffusers/` package and imported from the working directory (`sync.sh` re-syncs it). What
+# follows is everything that tree imports. Nothing is quantized in this deployment, so there is no `torchao`.
+--extra-index-url https://download.pytorch.org/whl/cu130
+torch==2.11.0
+torchvision==0.26.0
+# Pinned to the version the MiniMax-H3 parity work was verified against: the Qwen3-VL processor decides the vision
+# patch count, so a different minor changes the conditioning.
+transformers==5.8.0
+accelerate==1.14.0
+# The vendored tree needs `get_cached_repo_tree`, which landed in 1.23; diffusers pins <2.
+huggingface-hub==1.24.0
+gradio==6.20.0
+spaces==0.51.1
+# No `kernels` pin on purpose: the Hub attention backends want `kernels>=0.12.3`, and that version breaks
+# transformers 5.8.0 at import. cuDNN attention (`_native_cudnn`) is faster than the SDPA default and needs nothing.
+# PyAV: muxing the generated soundtrack onto the frames (`encode_video`).
+av
+pillow
+numpy
+requests
+safetensors>=0.8.0
+filelock
+regex
+importlib_metadata
