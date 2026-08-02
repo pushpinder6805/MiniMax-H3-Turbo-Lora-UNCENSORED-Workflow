@@ -302,7 +302,9 @@ def _fit_keyframe(image_path, current_canvas):
         h, w = cur_h, cur_w
 
     target = w / h
-    if abs(img.width / img.height - target) > 1e-3:
+    if abs(img.width / img.height - target) <= 1e-3:
+        return gr.update(), gr.update(value=label)
+    if True:
         if img.width / img.height > target:
             new_w = int(img.height * target)
             left = (img.width - new_w) // 2
@@ -358,7 +360,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
             video = gr.Video(label="Video + soundtrack")
             report = gr.Markdown(visible=False)
 
-    image.change(_fit_keyframe, [image, canvas], [image, canvas])
+    image.upload(_fit_keyframe, [image, canvas], [image, canvas])
 
     run.click(
         generate,
