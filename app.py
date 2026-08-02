@@ -226,7 +226,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress()):
+def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress(track_tqdm=True)):
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
@@ -279,24 +279,14 @@ def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed,
 
 load_models()
 
-INTRO = """# MiniMax-H3 — unquantized, split across two Spaces
+INTRO = """# MiniMax-H3
 
-Joint video **and** soundtrack out of one denoising pass, at **bfloat16, no quantization anywhere**.
-
-MiniMax-H3 is 195.9 GiB in bfloat16 and a ZeroGPU Space is evicted at 150 GB of storage, so the unquantized
-checkpoint does not fit in one Space. It does fit in two: the 62.14 GiB Qwen3-VL conditioner runs in
-[`minimax-h3-conditioner`](https://huggingface.co/spaces/diffusers-internal-dev/minimax-h3-conditioner) and this
-Space holds the 61.73 GiB transformer plus the two autoencoders. Every request calls the conditioner over the gradio
-API and gets back `prompt_embeds` `(1, num_text_tokens, 5120)` and `text_token_tags` `(num_text_tokens,)` — the whole
-wire format of the split.
-
-Fixed by the checkpoint: 24 fps, a 768 pixel short edge, 5–15 s, no CFG and no negative prompt.
+Generate video with a synchronized soundtrack from a prompt, in one pass. Optionally pin the first
+and/or last frame with a keyframe image. 24 fps, 5 to 15 seconds.
 """
 
-
-with gr.Blocks(title="MiniMax-H3 (split, bf16)") as demo:
+with gr.Blocks(title="MiniMax-H3") as demo:
     gr.Markdown(INTRO)
-    banner = gr.Markdown(status())
 
     with gr.Row():
         with gr.Column():
@@ -310,12 +300,12 @@ with gr.Blocks(title="MiniMax-H3 (split, bf16)") as demo:
                 last_image = gr.Image(label="Last keyframe (optional)", type="filepath")
             canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
             duration = gr.Slider(label="Duration (s)", minimum=5, maximum=MAX_UI_DURATION, step=1, value=5)
-            steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=30)
+            steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
             seed = gr.Number(label="Seed", value=42, precision=0)
             run = gr.Button("Generate", variant="primary")
         with gr.Column():
             video = gr.Video(label="Video + soundtrack")
-            report = gr.Markdown()
+            report = gr.Markdown(visible=False)
 
     run.click(
         generate,
@@ -323,7 +313,6 @@ with gr.Blocks(title="MiniMax-H3 (split, bf16)") as demo:
         [video, report],
         api_name="generate",
     )
-    demo.load(status, None, banner, api_name="status")
 
 
 if __name__ == "__main__":
