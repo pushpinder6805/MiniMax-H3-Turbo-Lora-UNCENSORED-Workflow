@@ -7,7 +7,7 @@ sdk: gradio
 sdk_version: 6.20.0
 app_file: app.py
 pinned: false
-short_description: Unquantized MiniMax-H3 with AoTI blocks, split in two
+short_description: Video generation with a synchronized soundtrack
 suggested_hardware: zero-a10g
 ---
 
