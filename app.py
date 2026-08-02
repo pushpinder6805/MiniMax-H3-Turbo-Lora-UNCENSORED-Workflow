@@ -327,8 +327,11 @@ INTRO = """# MiniMax-H3
   <a href="https://www.minimax.io"><strong>[ project ]</strong></a>
 </div>
 
-Generate video with a synchronized soundtrack from a prompt, in one pass. Optionally pin the first
-and/or last frame with a keyframe image. 24 fps, 5 to 15 seconds.
+**MiniMax-H3** is a 33B parameter state of the art video generation model that produces video and a
+fully synchronized soundtrack (ambience, foley, speech) **jointly, in a single denoising pass** rather than
+dubbing audio onto silent footage. One packed token sequence carries text, image conditioning, audio and video
+through a shared transformer. Guidance is distilled into the weights, so every step counts. 24 fps, up to 15 s,
+with optional first and last keyframes.
 """
 
 CSS = """
@@ -361,6 +364,23 @@ with gr.Blocks(title="MiniMax-H3") as demo:
             report = gr.Markdown(visible=False)
 
     image.upload(_fit_keyframe, [image, canvas], [image, canvas])
+
+    gr.Examples(
+        examples=[
+            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
+             None, None, DEFAULT_CANVAS, 5, 28, 42],
+            ["A busy night market, neon signs reflecting in puddles, sizzling street food",
+             None, None, "544x960 · 9:16 fast", 5, 28, 42],
+            ["A cellist playing a slow melody in an empty concert hall",
+             None, None, "544x544 · 1:1 fast", 5, 28, 42],
+            ["The fox looks around, then trots deeper into the forest",
+             "examples/first.png", None, DEFAULT_CANVAS, 5, 28, 42],
+            ["A slow seamless camera move from the first view to the last",
+             "examples/first.png", "examples/last.png", DEFAULT_CANVAS, 5, 28, 42],
+        ],
+        inputs=[prompt, image, last_image, canvas, duration, steps, seed],
+        cache_examples=False,
+    )
 
     run.click(
         generate,
