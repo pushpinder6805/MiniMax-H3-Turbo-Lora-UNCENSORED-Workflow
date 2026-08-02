@@ -227,7 +227,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress(track_tqdm=True)):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, progress=gr.Progress(track_tqdm=True)):
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
@@ -367,19 +367,17 @@ with gr.Blocks(title="MiniMax-H3") as demo:
 
     gr.Examples(
         examples=[
-            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
-             None, None, DEFAULT_CANVAS, 5, 28, 42],
-            ["A busy night market, neon signs reflecting in puddles, sizzling street food",
-             None, None, "544x960 · 9:16 fast", 5, 28, 42],
-            ["A cellist playing a slow melody in an empty concert hall",
-             None, None, "544x544 · 1:1 fast", 5, 28, 42],
-            ["The fox looks around, then trots deeper into the forest",
-             "examples/first.png", None, DEFAULT_CANVAS, 5, 28, 42],
-            ["A slow seamless camera move from the first view to the last",
-             "examples/first.png", "examples/last.png", DEFAULT_CANVAS, 5, 28, 42],
+            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", None, None, DEFAULT_CANVAS],
+            ["A busy night market, neon signs reflecting in puddles, sizzling street food", None, None, "544x960 · 9:16 fast"],
+            ["A cellist playing a slow melody in an empty concert hall", None, None, "544x544 · 1:1 fast"],
+            ["The fox looks around, then trots deeper into the forest", "examples/first.png", None, DEFAULT_CANVAS],
+            ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", DEFAULT_CANVAS],
         ],
-        inputs=[prompt, image, last_image, canvas, duration, steps, seed],
-        cache_examples=False,
+        inputs=[prompt, image, last_image, canvas],
+        outputs=[video, report],
+        fn=generate,
+        cache_examples=True,
+        cache_mode="lazy",
     )
 
     run.click(
