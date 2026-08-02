@@ -40,7 +40,7 @@ CANVASES = {
     "768x1024 · 3:4 full": (1024, 768),
     "1536x672 · 21:9 full": (672, 1536),
 }
-DEFAULT_CANVAS = "1344x768 · 16:9 full"
+DEFAULT_CANVAS = "960x544 · 16:9 fast"
 FPS, FRAMES_PER_CHUNK, LATENTS_PER_CHUNK = 24, 17, 5
 MAX_UI_DURATION = 14
 
@@ -379,11 +379,11 @@ with gr.Blocks(title="MiniMax-H3") as demo:
 
     gr.Examples(
         examples=[
-            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", None, None, DEFAULT_CANVAS],
+            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", None, None, "1344x768 · 16:9 full"],
             ["A busy night market, neon signs reflecting in puddles, sizzling street food", None, None, "768x1344 · 9:16 full"],
             ["A cellist playing a slow melody in an empty concert hall", None, None, "768x768 · 1:1 full"],
-            ["The fox looks around, then trots deeper into the forest", "examples/first.png", None, DEFAULT_CANVAS],
-            ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", DEFAULT_CANVAS],
+            ["The fox looks around, then trots deeper into the forest", "examples/first.png", None, "1344x768 · 16:9 full"],
+            ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", "1344x768 · 16:9 full"],
         ],
         inputs=[prompt, image, last_image, canvas],
         outputs=[video, report],
