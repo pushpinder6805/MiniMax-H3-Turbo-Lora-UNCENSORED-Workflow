@@ -50,6 +50,7 @@ CANVASES = {
     "544x960 · 9:16 fast": (960, 544),
     "640x1152 · 9:16": (1152, 640),
     "768x1344 · 9:16 full": (1344, 768),
+    "544x544 · 1:1 fast": (544, 544),
     "768x768 · 1:1 full": (768, 768),
     "1024x768 · 4:3 full": (768, 1024),
     "768x1024 · 3:4 full": (1024, 768),
@@ -277,9 +278,52 @@ def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed,
     return path, report
 
 
+
+def _fit_keyframe(image_path, current_canvas):
+    """Cover-crop an uploaded keyframe to the closest supported aspect ratio and select that ratio's
+    smallest (fastest) canvas, unless the user already picked a matching ratio."""
+    if not image_path:
+        return gr.update(), gr.update()
+    from PIL import Image as _Image
+
+    img = _Image.open(image_path)
+    aspect = img.width / img.height
+    fastest = {}
+    for label, (h, w) in CANVASES.items():
+        r = w / h
+        if r not in fastest or w * h < fastest[r][1][0] * fastest[r][1][1]:
+            fastest[r] = (label, (h, w))
+    ratio = min(fastest, key=lambda r: abs(r - aspect))
+    label, (h, w) = fastest[ratio]
+
+    cur_h, cur_w = CANVASES[current_canvas]
+    if abs(cur_w / cur_h - aspect) <= abs(ratio - aspect):
+        label = current_canvas
+        h, w = cur_h, cur_w
+
+    target = w / h
+    if abs(img.width / img.height - target) > 1e-3:
+        if img.width / img.height > target:
+            new_w = int(img.height * target)
+            left = (img.width - new_w) // 2
+            img = img.crop((left, 0, left + new_w, img.height))
+        else:
+            new_h = int(img.width / target)
+            top = (img.height - new_h) // 2
+            img = img.crop((0, top, img.width, top + new_h))
+        img.save(image_path)
+    return gr.update(value=image_path), gr.update(value=label)
+
+
 load_models()
 
 INTRO = """# MiniMax-H3
+
+<div align="center">
+  <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3"><strong>[ model ]</strong></a> &nbsp;
+  <a href="PAPER_URL_PLACEHOLDER"><strong>[ paper ]</strong></a> &nbsp;
+  <a href="https://www.minimax.io"><strong>[ project ]</strong></a>
+</div>
 
 Generate video with a synchronized soundtrack from a prompt, in one pass. Optionally pin the first
 and/or last frame with a keyframe image. 24 fps, 5 to 15 seconds.
@@ -306,6 +350,8 @@ with gr.Blocks(title="MiniMax-H3") as demo:
         with gr.Column():
             video = gr.Video(label="Video + soundtrack")
             report = gr.Markdown(visible=False)
+
+    image.change(_fit_keyframe, [image, canvas], [image, canvas])
 
     run.click(
         generate,
