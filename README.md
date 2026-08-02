@@ -7,7 +7,7 @@ sdk: gradio
 sdk_version: 6.20.0
 app_file: app.py
 pinned: false
-short_description: Unquantized MiniMax-H3, split across two ZeroGPU Spaces
+short_description: Unquantized MiniMax-H3 with AoTI blocks, split in two
 suggested_hardware: zero-a10g
 ---
 
@@ -35,6 +35,23 @@ reason alone. Cut the `MiniMaxH3Blocks` sequence at its `text_encoder` step and 
 
 Besides the quality argument, unquantized weights are the ones AoTI can export; an NVFP4 checkpoint cannot be
 exported at all.
+
+## AoTI-compiled blocks
+
+With `H3_AOTI=1` the 50 repeated transformer blocks run from a compiled package,
+`diffusers-internal-dev/minimax-h3-aoti:bf16/torch2.11/sm120/dynamic` — a single dynamic-sequence artifact that serves
+every canvas, duration and prompt length. It carries no weights (it reads each block's live ones), so patching it in
+is startup CPU work and costs no GPU time.
+
+It removes a near-constant ~0.5 s/step — 50 blocks' worth of kernel-launch overhead plus the norm / rotary / AdaLN
+epilogues around the matmuls — and cannot touch the matmuls themselves. So it pays best where the block is *not*
+compute bound, i.e. on the small canvases:
+
+| canvas (HxW) | eager s/step | AoTI s/step | faster |
+|---|---|---|---|
+| 768x1344 | 10.20 | 9.73 | +4.6% |
+| 640x1152 | 6.46 | 5.88 | +9.1% |
+| 544x960 | 4.02 | 3.58 | +11.0% |
 
 At 72.16 GiB of weights on a 95.0 GiB card there is no offloading in the request path at all, which is why an
 *unquantized* MiniMax-H3 is also the fastest one measured here: **10.6 s/step** against the 19–21 s/step the 4 bit
