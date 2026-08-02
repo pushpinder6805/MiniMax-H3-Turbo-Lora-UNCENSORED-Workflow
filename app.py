@@ -30,9 +30,11 @@ import gradio as gr
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "diffusers-internal-dev/MiniMax-H3")
 CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "diffusers-internal-dev/minimax-h3-conditioner")
-# `resident` keeps the 61.73 GiB transformer and the ~20.5 GiB of float32 VAEs on the card at once (82.3 of 95.0 GiB,
-# leaving ~12.7 GiB for activations); `offload` hands placement to `ComponentsManager.enable_auto_cpu_offload`.
-PLACEMENT = os.environ.get("H3_PLACEMENT", "resident").lower()
+# `preplace` moves the 61.73 GiB transformer onto the card at startup and leaves the 10.43 GiB of float32
+# autoencoders for the first GPU call; `offload` hands the whole thing to
+# `ComponentsManager.enable_auto_cpu_offload` instead. See `_drop_cached_weight_blobs` for why the *transformer
+# alone* rather than everything: the 150 GB storage quota, not the 95 GiB card, is the binding constraint at startup.
+PLACEMENT = os.environ.get("H3_PLACEMENT", "preplace").lower()
 # cuDNN's fused attention is 10-20% faster than the SDPA default on this pool and needs nothing installed.
 # flash-attention 3 is sm90-only and this card is sm120 (the `zero-a10g` flavour name is legacy).
 ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
@@ -113,10 +115,12 @@ def load_models() -> str | None:
         pipe.load_components(dtype=torch.bfloat16, token=token)
         pipe.transformer.set_attention_backend(ATTENTION)
 
-        if PLACEMENT == "resident":
+        if PLACEMENT == "preplace":
             # Plain bfloat16 tensors, so ZeroGPU's startup packing handles them — the thing that cannot be moved at
-            # startup is a torchao `Float8Tensor`, whose `aten.empty_like(pin_memory=True)` is unimplemented.
-            pipe.to("cuda")
+            # startup is a torchao `Float8Tensor`, whose `aten.empty_like(pin_memory=True)` is unimplemented. The
+            # autoencoders deliberately stay behind; `_generate` moves them on the first request.
+            pipe.transformer.to("cuda")
+            _log_disk(f"freed {_drop_cached_weight_blobs():.1f} GiB of downloaded weights")
         else:
             manager.enable_auto_cpu_offload(device="cuda")
             _arm_decode_hooks(pipe)
@@ -128,6 +132,46 @@ def load_models() -> str | None:
         traceback.print_exc()
         LOAD_ERROR = f"**Loading `{MODEL_REPO}` failed** after {time.time() - started:.0f}s: `{type(error).__name__}: {error}`"
     return LOAD_ERROR
+
+
+def _log_disk(label: str) -> None:
+    import shutil
+
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    probe = HF_HUB_CACHE if os.path.isdir(HF_HUB_CACHE) else os.path.expanduser("~")
+    _total, used, free = shutil.disk_usage(probe)
+    print(f"[gen] {label} · disk {used / 2**30:.1f} used, {free / 2**30:.1f} free", flush=True)
+
+
+def _drop_cached_weight_blobs() -> float:
+    """Delete the downloaded weight files once their tensors are copies in (fake-)CUDA memory.
+
+    A ZeroGPU Space is evicted at **150 GB of storage**, and `spaces`' startup `torch.pack()` writes every
+    startup-resident CUDA tensor to a *second* copy on disk before deleting the originals itself. This half
+    downloads 77.3 GB, so packing all of it needs 154.6 GB and the Space dies with `OSError: [Errno 28] No space
+    left on device` in `os.posix_fallocate` — which is exactly how its first bring-up died.
+
+    Two things keep it under the cap. Only the transformer is moved onto the card, so the pack is 66.3 GB rather
+    than 77.3 GB; and its shards are dropped here, before `launch()`, rather than after the pack. `.to("cuda")`
+    copies each parameter out of the memory-mapped shard, so those blobs are unreferenced by then and unlinking
+    them frees the space for real. The autoencoders are still mapped, so their ~11 GB survives the unlink — which
+    is fine, 66.3 + 11 is nowhere near the cap, and it is the arithmetic this Space is designed around:
+
+        worst case, nothing frees   77.3 (download) + 66.3 (pack) = 143.6 GB
+        expected                    11 (still-mapped VAEs) + 66.3 (pack) = 77.3 GB
+    """
+    import glob
+
+    from huggingface_hub.constants import HF_HUB_CACHE
+
+    blobs = os.path.join(HF_HUB_CACHE, "models--" + MODEL_REPO.replace("/", "--"), "blobs", "*")
+    freed = 0
+    for blob in glob.glob(blobs):
+        size = os.path.getsize(blob)
+        os.unlink(blob)
+        freed += size
+    return freed / 2**30
 
 
 def _arm_decode_hooks(pipe):
@@ -180,10 +224,20 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames):
 
 @spaces.GPU(duration=GPU_DURATION, size=GPU_SIZE)
 def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed):
-    """The only thing on GPU time: the packed-sequence denoise loop and the two decoders."""
+    """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
+
+    Only the three generated outputs come back. A `@spaces.GPU` return crosses a process boundary by pickling, and
+    the full `PipelineState` still holds the packed latents, the rotary grid and the row indices on the card.
+    """
     import torch
 
-    return PIPE(
+    if PLACEMENT == "preplace":
+        # The two autoencoders were left on the host so that ZeroGPU's startup pack stayed inside the storage quota;
+        # 10.43 GiB across PCIe on the first request, and a no-op walk on every one after it.
+        PIPE.vae.to("cuda")
+        PIPE.audio_vae.to("cuda")
+
+    state = PIPE(
         prompt_embeds=prompt_embeds.to("cuda"),
         text_token_tags=text_token_tags,
         image=image,
@@ -194,6 +248,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
         num_inference_steps=int(steps),
         generator=torch.Generator("cpu").manual_seed(int(seed)),
     )
+    return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
 def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress()):
@@ -220,7 +275,7 @@ def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed,
 
     progress(0.1, desc=f"Denoising {steps} steps at {width}x{height}, {num_frames} frames ...")
     started = time.time()
-    state = _generate(
+    frames, audio, sampling_rate = _generate(
         prompt_embeds,
         text_token_tags,
         Image.open(image_path) if image_path else None,
@@ -236,13 +291,7 @@ def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed,
     directory = os.path.join(tempfile.gettempdir(), "h3-outputs")
     os.makedirs(directory, exist_ok=True)
     path = os.path.join(directory, f"h3-{int(time.time() * 1000)}.mp4")
-    encode_video(
-        state.get("videos")[0],
-        fps=FPS,
-        output_path=path,
-        audio=state.get("audio")[0],
-        audio_sample_rate=state.get("sampling_rate"),
-    )
+    encode_video(frames, fps=FPS, output_path=path, audio=audio, audio_sample_rate=sampling_rate)
 
     report = (
         f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} steps · "

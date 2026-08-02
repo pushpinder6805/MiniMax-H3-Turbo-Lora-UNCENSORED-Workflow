@@ -31,10 +31,14 @@ reason alone. Cut the `MiniMaxH3Blocks` sequence at its `text_encoder` step and 
 | Space | Subfolders | Download | Resident |
 |---|---|---|---|
 | [`minimax-h3-conditioner`](https://huggingface.co/spaces/diffusers-internal-dev/minimax-h3-conditioner) | `text_encoder/` + `tokenizer/` + `processor/` | 66.7 GB | 62.15 GiB bf16 |
-| this one | `transformer/` + `vae/` + `audio_vae/` | 77.3 GB | 61.73 GiB bf16 + ~20.5 GiB float32 |
+| this one | `transformer/` + `vae/` + `audio_vae/` | 77.3 GB | 61.73 GiB bf16 + 10.43 GiB float32 |
 
 Besides the quality argument, unquantized weights are the ones AoTI can export; an NVFP4 checkpoint cannot be
 exported at all.
+
+At 72.16 GiB of weights on a 95.0 GiB card there is no offloading in the request path at all, which is why an
+*unquantized* MiniMax-H3 is also the fastest one measured here: **10.6 s/step** against the 19–21 s/step the 4 bit
+Space pays, where the whole cost is the traffic auto-offload has to move.
 
 ## How the split is expressed
 
@@ -71,17 +75,47 @@ before any GPU is attached, and these are plain bfloat16 tensors, so ZeroGPU's s
 torchao `Float8Tensor` that cannot be packed, and there is none here). The conditioner round trip is a network call
 on this Space's CPU. A `@spaces.GPU` call is therefore only the denoise loop and the two decoders.
 
+### The 150 GB quota, not the 95 GiB card, is what limits startup placement
+
+`spaces`' startup `torch.pack()` writes every startup-resident CUDA tensor to a **second copy on disk**, and only
+deletes the downloaded originals afterwards (`Cleaned 62.13GB of tensor files ... after packing`). Moving all
+77.3 GB onto the card therefore needs 154.6 GB at once, and the Space is evicted mid-pack:
+
+```
+ZeroGPU tensors packing:   0%|          | 0.00/77.3G
+OSError: [Errno 28] No space left on device      # os.posix_fallocate in spaces/zero/torch/packing.py
+```
+
+So only the transformer is preplaced — a 66.3 GB pack — and `app.py` unlinks the downloaded shards itself *before*
+`launch()` rather than after, which `.to("cuda")` has already made unreferenced. The autoencoders stay on the host
+and cross PCIe on the first request, 10.43 GiB and a no-op on every request after it.
+
 ## Generation constraints
 
 Fixed by the checkpoint: 24 fps, a 768 pixel short edge, 5 to 15 s, `num_frames` snapped up to the next `17 * n + 5`,
 no CFG and no negative prompt (it is guidance-distilled, so every step is one forward pass).
+
+## Measured
+
+An `rtx-pro-6000` Job — the same silicon as the ZeroGPU pool (RTX PRO 6000 Blackwell, sm120, 95.0 GiB) — running
+exactly this blockset over the wire format, 1344x768, 124 frames, 30 steps, bfloat16, cuDNN attention, everything
+resident:
+
+| | |
+|---|---|
+| `load_components` (77.3 GB, warm Xet) | 43 s |
+| `.to("cuda")` | 10 s |
+| resident weights | 72.16 GiB |
+| denoise + decode | 317 s, **10.58 s/step** |
+| peak allocated / reserved | 78.54 / 85.37 GiB |
+| output | h264 1344x768 @ 24 fps, 5.167 s + stereo AAC @ 32 kHz |
 
 ## Space variables
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `H3_CONDITIONER` | `diffusers-internal-dev/minimax-h3-conditioner` | The Space this one asks for embeddings. |
-| `H3_PLACEMENT` | `resident` | `resident` keeps all 82.3 GiB of weights on the 95.0 GiB card; `offload` hands placement to `ComponentsManager.enable_auto_cpu_offload`. |
+| `H3_PLACEMENT` | `preplace` | `preplace` puts the transformer on the card at startup and the autoencoders on the first request; `offload` hands placement to `ComponentsManager.enable_auto_cpu_offload`. |
 | `H3_ATTENTION` | `_native_cudnn` | cuDNN's fused kernel, 10–20% faster than the SDPA default and needs nothing installed. flash-attention 3 is sm90-only and this pool is sm120. |
 | `H3_GPU_DURATION` | `900` | Seconds per request; the pool applies a 1.5 duration factor. |
 | `H3_GPU_SIZE` | `xlarge` | ZeroGPU allocation size. `large` does not fit. |
