@@ -212,7 +212,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress()):
+def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress(track_tqdm=True)):
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
