@@ -114,6 +114,18 @@ resident:
 | peak allocated / reserved | 78.54 / 85.37 GiB |
 | output | h264 1344x768 @ 24 fps, 5.167 s + stereo AAC @ 32 kHz |
 
+And on this Space itself, driven over `gradio_client`. Startup is 93 s — the 77.3 GB download and the load, with
+no placement and therefore no pack.
+
+| Request | Conditioner | Denoise + decode | Steady | Round trip |
+|---|---|---|---|---|
+| text only, 18 tokens | 7 s | 339 s | 10.53 s/step | 353 s |
+| one 768x1344 keyframe, 1034 tokens | 9 s | 370 s | 11.39 s/step | 386 s |
+
+The keyframe costs about 8% per step rather than a placement penalty: it puts 1016 vision rows in front of the
+prompt *and* 1016 conditioning rows in the packed sequence, and MiniMax-H3 attends over all of it every layer. The
+one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear in the second.
+
 ## Space variables
 
 | Variable | Default | Meaning |

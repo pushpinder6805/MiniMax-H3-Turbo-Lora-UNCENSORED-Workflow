@@ -24,7 +24,7 @@ import time
 import traceback
 
 # First, and at module level. `import spaces` patches `torch.cuda` before any GPU is attached, which is what lets the
-# 82 GiB load happen at **startup** rather than on GPU time; it also has to precede anything that initializes CUDA.
+# 72 GiB load happen at **startup** rather than on GPU time; it also has to precede anything that initializes CUDA.
 import spaces
 import gradio as gr
 
