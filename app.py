@@ -1,19 +1,4 @@
-"""MiniMax-H3, split deployment — **the denoising half**.
-
-This Space holds the transformer and the two autoencoders, **unquantized bfloat16**, and nothing else. The 62.14 GiB
-Qwen3-VL conditioner lives in its own Space,
-[`minimax-h3-conditioner`](https://huggingface.co/spaces/diffusers-internal-dev/minimax-h3-conditioner), which this
-one calls over the gradio API for every request; what comes back is a safetensors file holding the two tensors the
-denoiser needs, `prompt_embeds` and `text_token_tags`.
-
-Why split at all: MiniMax-H3 is 195.9 GiB in bfloat16 and a ZeroGPU Space is evicted at 150 GB of storage, so an
-unquantized single Space is impossible — the existing demos run NVFP4 or float8 weights for that reason alone. Cut at
-the text-encoder step, this half pulls 77.3 GB (`transformer/` 61.73 GiB + `vae/` 9.70 + `audio_vae/` 0.56) and the
-other 66.7 GB, and neither is quantized.
-
-The blockset is `MiniMaxH3Blocks` with its `text_encoder` step removed — see `h3_split_blocks.py`. Dropping the step
-drops the three components it declares, so `load_components` never fetches the conditioner, and `prompt_embeds` /
-`text_token_tags` become ordinary required inputs of the pipeline call.
+"""MiniMax-H3, split deployment — denoising
 """
 
 from __future__ import annotations
@@ -35,7 +20,6 @@ CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "diffusers-internal-dev/min
 # deliberate — see `load_models`: the 150 GB storage quota, not the 95 GiB card, is what rules that out here.
 PLACEMENT = os.environ.get("H3_PLACEMENT", "lazy").lower()
 # cuDNN's fused attention is 10-20% faster than the SDPA default on this pool and needs nothing installed.
-# flash-attention 3 is sm90-only and this card is sm120 (the `zero-a10g` flavour name is legacy).
 ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
 GPU_DURATION = int(os.environ.get("H3_GPU_DURATION", "900"))
 GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
@@ -332,7 +316,7 @@ fully synchronized soundtrack (ambience, foley, speech).
 """
 
 CSS = """
-#col-container { max-width: 1180px; margin: 0 auto; }
+.main.fillable {max-width: 1100px !important}
 .dark .gradio-container { color: var(--body-text-color); }
 """
 
