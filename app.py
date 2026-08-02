@@ -316,7 +316,7 @@ fully synchronized soundtrack (ambience, foley, speech).
 """
 
 CSS = """
-.main.fillable {max-width: 1100px !important}
+.main.fillable {max-width: 1250px !important}
 .dark .gradio-container { color: var(--body-text-color); }
 """
 
