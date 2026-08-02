@@ -14,7 +14,7 @@ import spaces
 import gradio as gr
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "diffusers-internal-dev/MiniMax-H3")
-CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "diffusers-internal-dev/minimax-h3-conditioner")
+CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
 # `lazy` moves all 72.16 GiB onto the card on the first GPU call and leaves it there; `offload` hands placement to
 # `ComponentsManager.enable_auto_cpu_offload` instead. Neither puts anything on the card at *startup*, which is
 # deliberate — see `load_models`: the 150 GB storage quota, not the 95 GiB card, is what rules that out here.
@@ -170,7 +170,7 @@ def conditioner():
     if CLIENT is None:
         from gradio_client import Client
 
-        CLIENT = Client(CONDITIONER_SPACE, token=os.environ.get("HF_TOKEN"))
+        CLIENT = Client(CONDITIONER_SPACE)  # public Space, no org token: the request runs on the caller side quota
     return CLIENT
 
 
