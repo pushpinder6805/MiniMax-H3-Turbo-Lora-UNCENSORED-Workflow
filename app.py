@@ -42,14 +42,20 @@ GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
 ON_SPACES = bool(os.environ.get("SPACE_ID"))
 
 CANVASES = {
-    "16:9 (768x1344)": (768, 1344),
-    "9:16 (1344x768)": (1344, 768),
-    "1:1 (768x768)": (768, 768),
-    "4:3 (768x1024)": (768, 1024),
-    "3:4 (1024x768)": (1024, 768),
-    "21:9 (672x1536)": (672, 1536),
+    "960x544 · 16:9 fast (default)": (544, 960),
+    "1024x576 · 16:9 fast": (576, 1024),
+    "1152x640 · 16:9": (640, 1152),
+    "1280x704 · 16:9": (704, 1280),
+    "1344x768 · 16:9 full": (768, 1344),
+    "544x960 · 9:16 fast": (960, 544),
+    "640x1152 · 9:16": (1152, 640),
+    "768x1344 · 9:16 full": (1344, 768),
+    "768x768 · 1:1 full": (768, 768),
+    "1024x768 · 4:3 full": (768, 1024),
+    "768x1024 · 3:4 full": (1024, 768),
+    "1536x672 · 21:9 full": (672, 1536),
 }
-DEFAULT_CANVAS = "16:9 (768x1344)"
+DEFAULT_CANVAS = "960x544 · 16:9 fast (default)"
 FPS, FRAMES_PER_CHUNK, LATENTS_PER_CHUNK = 24, 17, 5
 MAX_UI_DURATION = 14
 
@@ -74,9 +80,11 @@ def status() -> str:
         return LOAD_ERROR
     if PIPE is None:
         return f"Loading `{MODEL_REPO}` (transformer + VAEs, 77.3 GB). Watch the Space logs."
+    import h3_aoti
+
     return (
         f"Ready · transformer + VAEs **bfloat16, unquantized** · placement `{PLACEMENT}` · attention `{ATTENTION}` · "
-        f"loaded in {LOADED_IN:.0f}s · conditioner `{CONDITIONER_SPACE}`"
+        f"{h3_aoti.status()} · loaded in {LOADED_IN:.0f}s · conditioner `{CONDITIONER_SPACE}`"
     )
 
 
@@ -122,6 +130,12 @@ def load_models() -> str | None:
         pipe = blocks.init_pipeline(MODEL_REPO, components_manager=manager, collection="h3")
         pipe.load_components(dtype=torch.bfloat16, token=token)
         pipe.transformer.set_attention_backend(ATTENTION)
+
+        # Still startup, still free: an AoTI package carries no weights and opens its compiled archive lazily inside
+        # the GPU worker, so pointing the 50-block stack at it is CPU work. Off unless `H3_AOTI=1`.
+        import h3_aoti
+
+        h3_aoti.maybe_load(pipe.transformer)
 
         if PLACEMENT == "offload":
             manager.enable_auto_cpu_offload(device="cuda")
@@ -212,7 +226,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress(track_tqdm=True)):
+def generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, progress=gr.Progress()):
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
