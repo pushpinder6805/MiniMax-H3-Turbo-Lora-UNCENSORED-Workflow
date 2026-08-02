@@ -18,7 +18,7 @@ CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "diffusers-internal-dev/min
 # `lazy` moves all 72.16 GiB onto the card on the first GPU call and leaves it there; `offload` hands placement to
 # `ComponentsManager.enable_auto_cpu_offload` instead. Neither puts anything on the card at *startup*, which is
 # deliberate — see `load_models`: the 150 GB storage quota, not the 95 GiB card, is what rules that out here.
-PLACEMENT = os.environ.get("H3_PLACEMENT", "lazy").lower()
+PLACEMENT = os.environ.get("H3_PLACEMENT", "pack").lower()
 # cuDNN's fused attention is 10-20% faster than the SDPA default on this pool and needs nothing installed.
 ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
 GPU_DURATION = int(os.environ.get("H3_GPU_DURATION", "900"))
@@ -122,6 +122,15 @@ def load_models() -> str | None:
 
         h3_aoti.maybe_load(pipe.transformer)
 
+        if PLACEMENT == "pack":
+            # Idiomatic ZeroGPU startup placement, scoped to the transformer only. `spaces` packs every
+            # startup-resident CUDA tensor into a second on-disk copy; packing all 77.3 GB (transformer + fp32
+            # VAEs) busts the 150 GB storage quota (77.3 + 77.3 + shards), but the 61.7 GB transformer alone
+            # packs to ~123 GB total and fits. The VAEs (~10 GB) take the lazy path on first GPU call, ~2 s.
+            # With AoTI the packed transformer pairs with the precompiled blocks: no placement, no compile,
+            # first request runs at steady state.
+            pipe.transformer.to("cuda")
+
         if PLACEMENT == "offload":
             manager.enable_auto_cpu_offload(device="cuda")
             _arm_decode_hooks(pipe)
@@ -189,7 +198,7 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames):
 # gpu_seconds = A + B * steps * tokens + C * steps * tokens^2, where tokens is the packed video row count.
 # PLACEMENT_ALLOWANCE covers the one-time 72 GiB lazy .to("cuda") a cold worker pays inside its first call.
 _DUR_A, _DUR_B, _DUR_C = -6.023, 2.0877e-4, 2.1221e-9
-_PLACEMENT_ALLOWANCE, _PAD = 20, 10  # lazy .to on a cold worker measures ~10 s; pack-at-startup exceeds the 150 GB quota
+_PLACEMENT_ALLOWANCE, _PAD = 12, 10  # pack mode: only the ~10 GB VAEs move on a cold worker
 
 
 def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
@@ -212,9 +221,12 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     import torch
 
     if PLACEMENT == "lazy":
-        # 72.16 GiB across PCIe on the first request of a worker, a no-op walk on every one after it. Startup
-        # placement is not an option here — see `load_models` — and this is what buys the offload-free denoise loop.
+        # 72.16 GiB across PCIe on the first request of a worker, a no-op walk on every one after it.
         PIPE.to("cuda")
+    elif PLACEMENT == "pack":
+        # Transformer was packed at startup; only the ~10 GB of fp32 VAEs walk across on a cold worker.
+        PIPE.vae.to("cuda")
+        PIPE.audio_vae.to("cuda")
 
     state = PIPE(
         prompt_embeds=prompt_embeds.to("cuda"),
