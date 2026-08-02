@@ -329,6 +329,11 @@ Generate video with a synchronized soundtrack from a prompt, in one pass. Option
 and/or last frame with a keyframe image. 24 fps, 5 to 15 seconds.
 """
 
+CSS = """
+#col-container { max-width: 1180px; margin: 0 auto; }
+.dark .gradio-container { color: var(--body-text-color); }
+"""
+
 with gr.Blocks(title="MiniMax-H3") as demo:
     gr.Markdown(INTRO)
 
@@ -362,4 +367,4 @@ with gr.Blocks(title="MiniMax-H3") as demo:
 
 
 if __name__ == "__main__":
-    demo.queue(max_size=4).launch(show_error=True)
+    demo.launch(show_error=True, theme=gr.themes.Citrus(), css=CSS)
