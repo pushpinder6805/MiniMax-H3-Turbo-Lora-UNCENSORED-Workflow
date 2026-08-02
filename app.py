@@ -345,13 +345,15 @@ with gr.Blocks(title="MiniMax-H3") as demo:
                 value="A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
             )
             with gr.Row():
-                image = gr.Image(label="First keyframe (optional)", type="filepath")
-                last_image = gr.Image(label="Last keyframe (optional)", type="filepath")
-            canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
-            duration = gr.Slider(label="Duration (s)", minimum=5, maximum=MAX_UI_DURATION, step=1, value=5)
-            steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
-            seed = gr.Number(label="Seed", value=42, precision=0)
+                image = gr.Image(label="First frame (optional)", type="filepath")
+                last_image = gr.Image(label="Last frame (optional)", type="filepath")
             run = gr.Button("Generate", variant="primary")
+            with gr.Accordion("Advanced options", open=False):
+                canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
+                duration = gr.Slider(label="Duration (s)", minimum=5, maximum=MAX_UI_DURATION, step=1, value=5)
+                steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
+                seed = gr.Number(label="Seed", value=42, precision=0)
+            
         with gr.Column():
             video = gr.Video(label="Video + soundtrack")
             report = gr.Markdown(visible=False)
