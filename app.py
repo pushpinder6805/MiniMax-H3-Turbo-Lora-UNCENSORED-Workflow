@@ -189,7 +189,7 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames):
 # gpu_seconds = A + B * steps * tokens + C * steps * tokens^2, where tokens is the packed video row count.
 # PLACEMENT_ALLOWANCE covers the one-time 72 GiB lazy .to("cuda") a cold worker pays inside its first call.
 _DUR_A, _DUR_B, _DUR_C = -6.023, 2.0877e-4, 2.1221e-9
-_PLACEMENT_ALLOWANCE, _PAD = 90, 10
+_PLACEMENT_ALLOWANCE, _PAD = 20, 10  # lazy .to on a cold worker measures ~10 s; pack-at-startup exceeds the 150 GB quota
 
 
 def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
