@@ -1,32 +1,12 @@
 """Bind AoTI constants that `torch.export` lifted anonymously.
 
-Problem
--------
-`spaces.zero.torch.aoti.LazyAOTIModel` binds a compiled package's constants **by name**::
+`spaces.zero.torch.aoti.LazyAOTIModel` binds a package's constants by intersecting the module's `state_dict()` with
+`compiled_model.get_constant_fqns()`, and keeps whatever it cannot match. `torch.export` only gives a lifted tensor a
+real FQN when it was a registered parameter or buffer; anything else is named `_tensor_constant<N>`, which no
+`state_dict()` can contain, so the compiled model runs against constants nobody set — a SIGSEGV rather than an error.
 
-    constant_fqns = compiled_model.get_constant_fqns()
-    constant_map = {name: tensor for name, tensor in weights.items() if name in constant_fqns}
-    compiled_model.load_constants(constant_map, check_full_update=check_full_update, user_managed=True)
-
-`torch.export` only gives a lifted tensor a real FQN when it was a registered parameter or buffer.
-Anything reached through a plain python attribute is classified `CONSTANT_TENSOR` and the compiled
-artifact names it `_tensor_constant<N>` — a name that can never appear in `state_dict()`. The
-intersection above is then empty, the dict comprehension silently drops every weight, and the
-compiled model runs against constants nobody ever set: a SIGSEGV rather than an error.
-
-This module fixes both halves:
-
-  * `write_constant_aliases(...)` — compile side. Records the exact
-    `_tensor_constant<N> -> real.dotted.fqn` mapping, which the `ExportedProgram` knows even when the
-    compiled package does not, into a `constant_aliases.json` sidecar next to `package.pt2`.
-
-  * `apply_spaces_constant_binding_patch()` — load side. Monkeypatches `LazyAOTIModel.__call__` so it
-    (1) uses that sidecar when present, (2) otherwise falls back to matching anonymous constants
-    against the leftover `state_dict()` entries by dtype+shape read out of the package's own
-    `wrapper.cpp`, and (3) **raises** if the binding is not total instead of segfaulting later.
-
-The load-side patch alone is enough to turn the crash into a clear diagnostic; with the sidecar it
-also makes the package work.
+`write_constant_aliases` records the real names on the compile side; `apply_spaces_constant_binding_patch` uses that
+sidecar on the load side, falls back to matching by dtype+shape, and raises if the binding is still not total.
 """
 
 from __future__ import annotations
@@ -56,10 +36,7 @@ _DTYPES = {
 def register_loose_tensors(module: torch.nn.Module, prefix: str = "") -> list[str]:
     """Re-register plain tensor attributes as buffers so `torch.export` gives them real FQNs.
 
-    Model-agnostic and numerics-preserving: it changes how a tensor is *registered*, never the tensor
-    and never the forward. Run it on the shallow clone right after
-    `unwrap_tensor_subclass_parameters`, immediately before `torch.export.export`. Returns the names
-    it re-registered, which is empty for a module that was already well-formed.
+    Run on the shallow clone, right before `torch.export.export`. Returns the names it re-registered.
     """
     registered = []
     for name, value in list(vars(module).items()):
@@ -78,8 +55,8 @@ def register_loose_tensors(module: torch.nn.Module, prefix: str = "") -> list[st
 def constant_aliases_from_exported_program(exported_program) -> dict[str, str]:
     """`{'_tensor_constant<N>': '<real dotted fqn>'}` for every anonymously lifted constant.
 
-    AOT Inductor numbers its `_tensor_constant<N>` slots in the order the `CONSTANT_TENSOR` inputs
-    appear in the export graph signature, and the signature still carries each one's real FQN.
+    AOT Inductor numbers its slots in the order the `CONSTANT_TENSOR` inputs appear in the graph signature, which
+    still carries each one's real FQN.
     """
     targets = [
         spec.target
@@ -137,13 +114,12 @@ def resolve_constant_map(
     aliases=None,
     allow_shape_fallback: bool = False,
 ):
-    """Map every compiled constant FQN onto one of `weights`, or explain why it cannot."""
+    """Map every compiled constant FQN onto one of `weights`, or report what is left over."""
     constant_map = {name: weights[name] for name in constant_fqns if name in weights}
     missing = [name for name in constant_fqns if name not in constant_map]
     if not missing:
         return constant_map, []
 
-    # 1. the exact mapping, if the compile side recorded one
     aliases = aliases or {}
     for name in list(missing):
         target = aliases.get(name)
@@ -153,10 +129,9 @@ def resolve_constant_map(
     if not missing or not allow_shape_fallback:
         return constant_map, missing
 
-    # 2. otherwise match by dtype+shape against the state_dict entries nobody claimed, preserving
-    #    each side's own order inside a (dtype, shape) group. `get_constant_fqns()` returns the
-    #    slots in *lexicographic* order (`_tensor_constant10` before `_tensor_constant2`), so the
-    #    package's own `constants_info_` index is the only correct order to walk them in.
+    # Match by dtype+shape against the unclaimed `state_dict()` entries, preserving each side's own order inside a
+    # (dtype, shape) group. `get_constant_fqns()` returns slots lexicographically (`_tensor_constant10` before
+    # `_tensor_constant2`), so the package's own `constants_info_` index is the only correct order to walk them in.
     info = _package_constants_info(archive_file)
     by_name = {entry.get("name"): entry for entry in info}
     slot_index = {entry.get("name"): index for index, entry in enumerate(info)}

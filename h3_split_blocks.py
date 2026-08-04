@@ -1,38 +1,15 @@
 """The halves of a **split** MiniMax-H3 deployment, for both of its checkpoint partitions.
 
-MiniMax-H3 is modular-only, and the whole model is one `MiniMaxH3Blocks` sequence whose branches are picked per
-request — and per `workflow=` — from the inputs:
+MiniMax-H3 is 195.9 GiB in bfloat16 and a ZeroGPU Space is evicted at 150 GB of storage, so `MiniMaxH3Blocks` is cut
+at its `text_encoder` step: the 62.14 GiB Qwen3-VL runs in the conditioner Space, everything else in a generator
+Space, and `prompt_embeds` + `text_token_tags` is the whole wire format between them.
 
-    before_encode -> text_encoder -> vae_encoder -> denoise -> after_denoise -> decode
+`resize` / `setup` run on **both** sides: they own no pretrained component, and each half needs the canvas and the
+prepared keyframes or normalized references. Both conditioner halves also return the resolved `height` / `width` /
+`num_frames`, which the generating half pins rather than re-deriving.
 
-where `before_encode`, `text_encoder`, `vae_encoder` and `denoise` each switch on `references` (the `ref2va` workflow)
-versus the keyframe inputs (`t2va` / `fl2va`), and `denoise` is itself `prepare_layout -> prepare_latents ->
-set_timesteps -> denoise` against `transformer` or `transformer_ref`.
-
-The conditioner (a 62.14 GiB Qwen3-VL) and the denoiser (a 61.73 GiB transformer plus ~20.5 GiB of float32 VAEs) do
-not fit on one 95 GiB card unquantized, so this module cuts that sequence in two at the `text_encoder` step, once per
-partition:
-
-  * `MiniMaxH3ConditionerBlocks` = `[resize, text_encoder]` — loads `text_encoder` / `tokenizer` / `processor` only
-    (plus the `image_processor`, which is built from config and downloads nothing), and emits `prompt_embeds` +
-    `text_token_tags`, which is the whole wire format between the two halves.
-  * `MiniMaxH3GeneratorBlocks` = everything else — loads `transformer` / `vae` / `audio_vae` / the two schedulers
-    only, and takes `prompt_embeds` + `text_token_tags` as *inputs*.
-  * `MiniMaxH3Ref2VAConditionerBlocks` / `MiniMaxH3Ref2VAGeneratorBlocks` are the same cut through the `ref2va`
-    branch, so one conditioner Space serves both partitions out of the weights it already holds.
-
-`resize` / `setup` run on both sides on purpose. They own no pretrained component (PIL, decoded media and arithmetic),
-they resolve the canvas and prepare the keyframes or normalize the references — which the conditioner needs to build
-its vision blocks and the generator needs to encode with the VAEs. Running them twice over the same inputs is
-deterministic; both conditioner halves return the resolved `height` / `width` / `num_frames` anyway, so the caller
-pins them explicitly on the generating half.
-
-Two things the blocks leave to the caller: a keyframe reaches them EXIF-transposed and in RGB, and the `t2va` /
-`fl2va` frame count is aligned to `17 * n + 5` before the call, since that arithmetic lives in the layout step on the
-denoising side of the cut. `ref2va` still resolves its own frame count, but requires one to be passed.
-
-Only *text* encoding is remote. `vae_encoder` / `reference_encoder` stay on the denoising side: they run the two
-autoencoders, which the conditioner Space does not hold.
+Two things the blocks leave to the caller: a keyframe reaches them EXIF-transposed and in RGB, and the `t2va` / `fl2va`
+frame count is aligned to `17 * n + 5` before the call, since that arithmetic lives on the denoising side of the cut.
 """
 
 from diffusers.modular_pipelines.minimax_h3.before_encoder import MiniMaxH3Ref2VASetupStep
@@ -55,10 +32,7 @@ from diffusers.modular_pipelines.modular_pipeline_utils import OutputParam
 
 
 def _wire_outputs(num_frames: bool = True) -> list[OutputParam]:
-    """The wire format of the split, plus the plan the caller pins on the generating half.
-
-    `num_frames` is declared by the `ref2va` half alone: it is the one whose setup step resolves a frame count.
-    """
+    """The wire format of the split. `num_frames` is declared by the `ref2va` half alone, whose setup resolves one."""
     return [
         OutputParam.template("prompt_embeds"),
         OutputParam("text_token_tags", description="The per-row modality tag of every row of `prompt_embeds`."),
@@ -121,12 +95,9 @@ class MiniMaxH3GeneratorBlocks(SequentialPipelineBlocks):
 class MiniMaxH3Ref2VAConditionerBlocks(SequentialPipelineBlocks):
     """The conditioner half of a split `ref2va`: the resolved plan plus the Qwen3-VL read at its 50th layer.
 
-    Component for component this is `MiniMaxH3ConditionerBlocks` — `text_encoder`, `tokenizer`, `processor` — which
-    is what lets one conditioner Space serve both partitions of the checkpoint out of the weights it already holds.
-    What differs is the presentation the Qwen3-VL is shown: `ref2va` prepends a label per reference, numbered per
-    modality, and a vision block per image and per merged video frame pair, so the references themselves have to
-    reach this half. An audio reference never does — it contributes its `"<Audio j>: "` label and nothing else — but
-    it is still part of the request here, because the setup step normalizes every soundtrack and validates the mix.
+    Component for component this is `MiniMaxH3ConditionerBlocks`, so one conditioner Space serves both partitions.
+    What differs is the presentation: `ref2va` prepends a label per reference and a vision block per image and per
+    merged video frame pair, so the references themselves have to reach this half.
     """
 
     model_name = "minimax-h3"
@@ -149,9 +120,8 @@ class MiniMaxH3Ref2VAConditionerBlocks(SequentialPipelineBlocks):
 class MiniMaxH3Ref2VAGeneratorBlocks(SequentialPipelineBlocks):
     """The denoising half of a split `ref2va`: the `ref2va` branch with its `text_encoder` step removed.
 
-    Only the text-encoder step is dropped. `reference_encoder` is this half's own encoder — it runs the video VAE
-    over the image and video references and the audio VAE over the soundtracks, and its output shapes are where every
-    reference block's geometry in the packed layout comes from — so it stays here, next to the autoencoders.
+    `reference_encoder` stays here, next to the two autoencoders it runs: its output shapes are where every reference
+    block's geometry in the packed layout comes from.
     """
 
     model_name = "minimax-h3"

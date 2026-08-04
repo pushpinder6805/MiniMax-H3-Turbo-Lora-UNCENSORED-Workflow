@@ -1,5 +1,4 @@
-"""MiniMax-H3, split deployment — denoising
-"""
+"""MiniMax-H3 `t2va` / `fl2va`, split deployment — the denoising half."""
 
 from __future__ import annotations
 
@@ -9,23 +8,22 @@ import time
 import traceback
 from functools import cache
 
-# First, and at module level. `import spaces` patches `torch.cuda` before any GPU is attached, which is what lets the
-# 72 GiB load happen at **startup** rather than on GPU time; it also has to precede anything that initializes CUDA.
+# Before anything that could initialize CUDA: `import spaces` patches `torch.cuda` so the 72 GiB load can happen at
+# startup rather than on GPU time.
 import spaces
 import gradio as gr
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "MiniMaxAI/MiniMax-H3")
 CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
-# `lazy` moves all 72.16 GiB onto the card on the first GPU call and leaves it there; `offload` hands placement to
-# `ComponentsManager.enable_auto_cpu_offload` instead. Neither puts anything on the card at *startup*, which is
-# deliberate — see `load_models`: the 150 GB storage quota, not the 95 GiB card, is what rules that out here.
+# `pack` places the transformer at startup, `lazy` moves everything on the first GPU call, `offload` hands placement to
+# `ComponentsManager.enable_auto_cpu_offload`.
 PLACEMENT = os.environ.get("H3_PLACEMENT", "pack").lower()
 # cuDNN's fused attention is 10-20% faster than the SDPA default on this pool and needs nothing installed.
 ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
-GPU_DURATION = int(os.environ.get("H3_GPU_DURATION", "900"))
 GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
-ON_SPACES = bool(os.environ.get("SPACE_ID"))
 
+# Must stay identical to the conditioner's table: the *label* goes over the wire, so a canvas that half does not know
+# is rejected there and surfaces as a failure here.
 CANVASES = {
     # 16:9
     "960x544 · 16:9 fast": (544, 960),
@@ -51,9 +49,9 @@ CANVASES = {
 }
 DEFAULT_CANVAS = "960x544 · 16:9 fast"
 FPS, FRAMES_PER_CHUNK, LATENTS_PER_CHUNK = 24, 17, 5
-# MiniMax-H3 generates 5 to 15 seconds, and it is the snapped frame count that has to hold for the ceiling: 15 s is
-# 360 frames, which rounds up to 362, i.e. 15.083 s, and is refused.
-MIN_UI_DURATION, MAX_UI_DURATION = 5, 14
+# It is the *snapped* frame count the ceiling has to hold for: 15 s is 360 frames, which rounds up to 362, i.e.
+# 15.083 s, and is refused.
+MIN_UI_DURATION, MAX_UI_DURATION = 2, 14
 
 
 def snap_frames(seconds: float) -> int:
@@ -62,6 +60,13 @@ def snap_frames(seconds: float) -> int:
     while frames % FRAMES_PER_CHUNK != LATENTS_PER_CHUNK:
         frames += 1
     return frames
+
+
+def lower_duration_floor(seconds: float = MIN_UI_DURATION) -> None:
+    """Let the pipeline generate below its 5 s floor. 56 frames (2.33 s) is fine on the released checkpoint."""
+    from diffusers.modular_pipelines.minimax_h3.modular_pipeline import MiniMaxH3ModularPipeline
+
+    MiniMaxH3ModularPipeline.min_duration = property(lambda self: float(seconds))
 
 
 PIPE = None
@@ -84,24 +89,12 @@ def status() -> str:
 
 
 def load_models() -> str | None:
-    """Load the denoising half. At **startup**, but *not* onto the card.
+    """Load the denoising half at startup.
 
-    `MiniMaxH3GeneratorBlocks` declares `transformer`, `vae`, `audio_vae`, `scheduler`, `audio_scheduler` and
-    `video_processor` as its pretrained components (plus an `image_processor` built from config), so
-    `load_components` fetches exactly those subfolders out of the shared `modular_model_index.json` —
-    `text_encoder/` and `transformer_ref/` are never touched.
-
-    Both autoencoders carry `_keep_in_fp32_modules` over every module, so the `dtype` below is refused for them and
-    they stay float32: a bfloat16 audio VAE decodes the soundtrack roughly 20 dB too quiet.
-
-    Nothing is moved onto the card here, which is the one place this Space departs from the ZeroGPU idiom, and the
-    reason is storage rather than memory. `spaces`' startup `torch.pack()` writes every startup-resident CUDA tensor
-    to a **second copy on disk** and only deletes the downloaded originals afterwards; 77.3 GB of weights plus a
-    77.3 GB pack is 154.6 GB against a 150 GB quota, and the Space is evicted mid-pack with `OSError: [Errno 28] No
-    space left on device` out of `os.posix_fallocate`. Deleting the shards first does not help either: the pack's own
-    cleanup walks the still-open mappings and `lstat`s them, so an unlinked blob turns into `FileNotFoundError:
-    ... (deleted)`. Placement therefore happens on the first GPU call, where it costs about 10 s of PCIe and then
-    persists across every later request in the same worker.
+    `MiniMaxH3GeneratorBlocks` declares `transformer`, `vae`, `audio_vae`, the two schedulers and `video_processor`,
+    so `load_components` fetches exactly those subfolders — `text_encoder/` and `transformer_ref/` are never touched.
+    Both autoencoders carry `_keep_in_fp32_modules` over every module and stay float32: a bfloat16 audio VAE decodes
+    the soundtrack roughly 20 dB too quiet.
     """
     global PIPE, MANAGER, LOAD_ERROR, LOADED_IN
 
@@ -115,6 +108,7 @@ def load_models() -> str | None:
 
         from h3_split_blocks import MiniMaxH3GeneratorBlocks
 
+        lower_duration_floor()
         manager = ComponentsManager()
         blocks = MiniMaxH3GeneratorBlocks()
         print(f"[gen] loading {[c.name for c in blocks.expected_components]} from {MODEL_REPO} ...", flush=True)
@@ -122,19 +116,16 @@ def load_models() -> str | None:
         pipe.load_components(dtype=torch.bfloat16)
         pipe.transformer.set_attention_backend(ATTENTION)
 
-        # Still startup, still free: an AoTI package carries no weights and opens its compiled archive lazily inside
-        # the GPU worker, so pointing the 50-block stack at it is CPU work. Off unless `H3_AOTI=1`.
+        # Still startup, still free: an AoTI package carries no weights and opens its archive lazily inside the GPU
+        # worker. Off unless `H3_AOTI=1`.
         import h3_aoti
 
         h3_aoti.maybe_load(pipe.transformer)
 
         if PLACEMENT == "pack":
-            # Idiomatic ZeroGPU startup placement, scoped to the transformer only. `spaces` packs every
-            # startup-resident CUDA tensor into a second on-disk copy; packing all 77.3 GB (transformer + fp32
-            # VAEs) busts the 150 GB storage quota (77.3 + 77.3 + shards), but the 61.7 GB transformer alone
-            # packs to ~123 GB total and fits. The VAEs (~10 GB) take the lazy path on first GPU call, ~2 s.
-            # With AoTI the packed transformer pairs with the precompiled blocks: no placement, no compile,
-            # first request runs at steady state.
+            # Scoped to the transformer. `spaces` packs every startup-resident CUDA tensor into a second on-disk copy,
+            # and packing all 77.3 GB busts the 150 GB storage quota; the 61.7 GB transformer alone fits. The ~10 GB of
+            # fp32 VAEs move on the first GPU call instead.
             pipe.transformer.to("cuda")
 
         if PLACEMENT == "offload":
@@ -153,9 +144,8 @@ def load_models() -> str | None:
 def _arm_decode_hooks(pipe):
     """Make the offload hooks fire for the two VAEs.
 
-    `enable_auto_cpu_offload` installs accelerate hooks, which wrap `forward`. The decode blocks call
-    `components.vae.decode(...)` and `components.audio_vae.decode(...)` directly, so the hook never runs and the VAE
-    is still on the host when the latents arrive on the card.
+    `enable_auto_cpu_offload` wraps `forward`, and the decode blocks call `vae.decode(...)` directly, so the hook
+    never runs and the VAE is still on the host when the latents arrive on the card.
     """
     for name in ("vae", "audio_vae"):
         module = getattr(pipe, name)
@@ -172,20 +162,16 @@ def _arm_decode_hooks(pipe):
 
 @cache
 def conditioner():
-    """The other half, over the gradio API. `gradio_client` attaches the caller's own ZeroGPU token per call, off
-    gradio's `LocalContext`, so the conditioner's booking is billed to the user who asked for the video."""
+    """The other half, over the gradio API. `gradio_client` attaches the caller's own ZeroGPU token per call, so the
+    conditioner's booking is billed to whoever asked for the video."""
     from gradio_client import Client
 
     return Client(CONDITIONER_SPACE)
 
 
 def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False):
-    """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely.
-
-    `rewrite_prompt` asks the conditioner to rewrite the request into MiniMax-H3's trained format with its own
-    Qwen3-VL and encode that, handing the rewrite back under the plan's `refined_prompt`. It runs on the conditioner's
-    booking, and this call happens before `_generate` books a card here, so `get_duration` is unaffected.
-    """
+    """`/encode` on the conditioner Space: a safetensors file holding `prompt_embeds` + `text_token_tags`, with the
+    resolved `height` / `width` / `num_frames` in its metadata, plus the plan. `canvas` is the label."""
     from gradio_client import handle_file
     from safetensors import safe_open
 
@@ -203,37 +189,37 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewri
         return handle.get_tensor("prompt_embeds"), handle.get_tensor("text_token_tags"), metadata, plan
 
 
-# Fitted on live probes (5 configs spanning canvas, duration and steps; max residual 3.7 s):
-# gpu_seconds = A + B * steps * tokens + C * steps * tokens^2, where tokens is the packed video row count.
-# PLACEMENT_ALLOWANCE covers the one-time 72 GiB lazy .to("cuda") a cold worker pays inside its first call.
-_DUR_A, _DUR_B, _DUR_C = -6.023, 2.0877e-4, 2.1221e-9
-_PLACEMENT_ALLOWANCE, _PAD = 12, 10  # pack mode: only the ~10 GB VAEs move on a cold worker
+# Seconds of GPU one request needs, from the packed video rows it is about to denoise: linear in the rows for the
+# matmuls, quadratic for the attention, against the AoTI block package this Space runs.
+_DUR_B, _DUR_C = 1.1745e-4, 3.8396e-9
+# The two resident decoders and the mux, which scale with the output rather than with the step count.
+_DECODE_BASE, _DECODE_PER_DEFAULT_CANVAS, _DEFAULT_CANVAS_PIXELS = 15, 15, 960 * 544 * 124
+# `pack` mode: only the ~10 GB of VAEs move on a cold worker.
+_PLACEMENT_ALLOWANCE, _PAD = 12, 10
 
 
 def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
-    latent_frames = (int(num_frames) - 5) // 17 * 5 + 2
-    patches = (int(height) // 32) * (int(width) // 32)
-    tokens = latent_frames * patches
-    tokens += (int(image is not None) + int(last_image is not None)) * patches
-    st = int(steps) * tokens
-    compute = _DUR_A + _DUR_B * st + _DUR_C * st * tokens
-    return max(60, int(compute) + _PLACEMENT_ALLOWANCE + _PAD)
+    height, width, num_frames, steps = int(height), int(width), int(num_frames), int(steps)
+    latent_frames = (num_frames - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK * LATENTS_PER_CHUNK + 2
+    patches = (height // 32) * (width // 32)
+    rows = latent_frames * patches + (int(image is not None) + int(last_image is not None)) * patches
+    denoise = steps * (_DUR_B * rows + _DUR_C * rows**2)
+    decode = _DECODE_BASE + _DECODE_PER_DEFAULT_CANVAS * (height * width * num_frames) / _DEFAULT_CANVAS_PIXELS
+    return max(60, int(denoise + decode) + _PLACEMENT_ALLOWANCE + _PAD)
 
 
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
 def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed):
     """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
 
-    Only the three generated outputs come back. A `@spaces.GPU` return crosses a process boundary by pickling, and
+    Only the three generated outputs come back — a `@spaces.GPU` return crosses a process boundary by pickling, and
     the full `PipelineState` still holds the packed latents, the rotary grid and the row indices on the card.
     """
     import torch
 
     if PLACEMENT == "lazy":
-        # 72.16 GiB across PCIe on the first request of a worker, a no-op walk on every one after it.
         PIPE.to("cuda")
     elif PLACEMENT == "pack":
-        # Transformer was packed at startup; only the ~10 GB of fp32 VAEs walk across on a cold worker.
         PIPE.vae.to("cuda")
         PIPE.audio_vae.to("cuda")
 
@@ -252,7 +238,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
 
 
 def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
-    """One request. `upsample` is last and defaults off, so a positional API client is unaffected by it."""
+    """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
@@ -275,9 +261,9 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
     refined = plan.get("refined_prompt") or ""
 
-    # EXIF-transposed and in RGB, the same way the conditioner prepares it: the conditioning latents encoded here have
-    # to be of the image the conditioner looked at.
     def keyframe(path):
+        # The conditioning latents encoded here have to be of the image the conditioner looked at, which it prepares
+        # exactly this way.
         return ImageOps.exif_transpose(Image.open(path)).convert("RGB") if path else None
 
     progress(0.1, desc=f"Denoising {steps} steps at {width}x{height}, {num_frames} frames ...")
@@ -310,10 +296,9 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     return path, report, refined, gr.update(visible=bool(refined))
 
 
-
 def _fit_keyframe(image_path, current_canvas):
-    """Cover-crop an uploaded keyframe to the closest supported aspect ratio and select that ratio's
-    smallest (fastest) canvas, unless the user already picked a matching ratio."""
+    """Cover-crop an uploaded keyframe to the closest supported aspect ratio and select that ratio's smallest
+    (fastest) canvas, unless the user already picked a matching ratio."""
     if not image_path:
         return gr.update(), gr.update()
     from PIL import Image as _Image
@@ -336,16 +321,15 @@ def _fit_keyframe(image_path, current_canvas):
     target = w / h
     if abs(img.width / img.height - target) <= 1e-3:
         return gr.update(), gr.update(value=label)
-    if True:
-        if img.width / img.height > target:
-            new_w = int(img.height * target)
-            left = (img.width - new_w) // 2
-            img = img.crop((left, 0, left + new_w, img.height))
-        else:
-            new_h = int(img.width / target)
-            top = (img.height - new_h) // 2
-            img = img.crop((0, top, img.width, top + new_h))
-        img.save(image_path)
+    if img.width / img.height > target:
+        new_w = int(img.height * target)
+        left = (img.width - new_w) // 2
+        img = img.crop((left, 0, left + new_w, img.height))
+    else:
+        new_h = int(img.width / target)
+        top = (img.height - new_h) // 2
+        img = img.crop((0, top, img.width, top + new_h))
+    img.save(image_path)
     return gr.update(value=image_path), gr.update(value=label)
 
 
@@ -355,8 +339,8 @@ INTRO = """# MiniMax-H3
 
 <div align="center">
   <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3"><strong>[ model ]</strong></a> &nbsp;
-  <a href="PAPER_URL_PLACEHOLDER"><strong>[ paper ]</strong></a> &nbsp;
-  <a href="https://www.minimax.io"><strong>[ project ]</strong></a>
+  <a href="https://www.minimax.io/blog/minimax-h3"><strong>[ blog ]</strong></a> &nbsp;
+  <a href="https://huggingface.co/spaces/multimodalart/minimax-h3-reference"><strong>[ reference to video ]</strong></a>
 </div>
 
 **MiniMax-H3** is a 33B parameter state of the art video generation model that produces video and a
@@ -413,8 +397,6 @@ with gr.Blocks(title="MiniMax-H3") as demo:
         cache_mode="lazy",
     )
 
-    # `upsample` is last and defaults off, so a positional API client that predates it is unaffected; so is the
-    # output order, with the upsampled prompt appended after the video and the report.
     run.click(
         generate,
         [prompt, image, last_image, canvas, duration, steps, seed, upsample],
