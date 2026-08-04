@@ -7,6 +7,7 @@ import os
 import tempfile
 import time
 import traceback
+from functools import cache
 
 # First, and at module level. `import spaces` patches `torch.cuda` before any GPU is attached, which is what lets the
 # 72 GiB load happen at **startup** rather than on GPU time; it also has to precede anything that initializes CUDA.
@@ -65,7 +66,6 @@ PIPE = None
 MANAGER = None
 LOAD_ERROR: str | None = None
 LOADED_IN: float | None = None
-CLIENT = None
 
 
 def status() -> str:
@@ -117,8 +117,6 @@ def load_models() -> str | None:
         blocks = MiniMaxH3GeneratorBlocks()
         print(f"[gen] loading {[c.name for c in blocks.expected_components]} from {MODEL_REPO} ...", flush=True)
         pipe = blocks.init_pipeline(MODEL_REPO, components_manager=manager, collection="h3")
-        # Every repository this Space reads is public — the checkpoint, the AoTI packages and the conditioner
-        # Space — so no token is passed anywhere.
         pipe.load_components(dtype=torch.bfloat16)
         pipe.transformer.set_attention_backend(ATTENTION)
 
@@ -170,45 +168,13 @@ def _arm_decode_hooks(pipe):
         module.decode = armed
 
 
+@cache
 def conditioner():
-    """The other half, over the gradio API. Cached — building a `Client` costs a round trip to the Space config.
+    """The other half, over the gradio API. `gradio_client` attaches the caller's own ZeroGPU token per call, off
+    gradio's `LocalContext`, so the conditioner's booking is billed to the user who asked for the video."""
+    from gradio_client import Client
 
-    No token is passed and none has to be: `gradio_client` attaches the caller's own ZeroGPU token itself, per call,
-    by reading the `x-ip-token` of the request being served off gradio's `LocalContext` (`Client.send_data` ->
-    `add_zero_gpu_headers`). So calling this from inside an event listener — which is the only place it is called —
-    bills the conditioner's booking to the user who asked for the video, exactly as this Space's own booking is, and
-    forwarding the header by hand would only pin a stale token onto a cached client.
-    """
-    global CLIENT
-    if CLIENT is None:
-        from gradio_client import Client
-
-        CLIENT = Client(CONDITIONER_SPACE)
-    return CLIENT
-
-def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False):
-    """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely.
-
-    `rewrite_prompt` is the conditioner's prompt upsampling: it rewrites the request into MiniMax-H3's trained format
-    with its own Qwen3-VL and encodes *that*, handing the rewrite back under the plan's `refined_prompt`. It runs on
-    the conditioner's GPU booking, and this whole call happens before `_generate` books a card here, so it costs this
-    Space's `get_duration` nothing.
-    """
-    from gradio_client import handle_file
-    from safetensors import safe_open
-
-    path, plan = conditioner().predict(
-        prompt=prompt,
-        image_path=handle_file(image_path) if image_path else None,
-        last_image_path=handle_file(last_image_path) if last_image_path else None,
-        canvas=canvas,
-        num_frames=num_frames,
-        rewrite_prompt=bool(rewrite_prompt),
-        api_name="/encode",
-    )
-    with safe_open(path, framework="pt") as handle:
-        metadata = handle.metadata()
-        return handle.get_tensor("prompt_embeds"), handle.get_tensor("text_token_tags"), metadata, plan
+    return Client(CONDITIONER_SPACE)
 
 
 
@@ -262,7 +228,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
 
 
 def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
-    """One request. `upsample` is appended last and defaults off, so an existing API client is untouched by it."""
+    """One request. `upsample` is last and defaults off, so a positional API client is unaffected by it."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
@@ -285,9 +251,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
     refined = plan.get("refined_prompt") or ""
 
-    # EXIF-transposed and in RGB before the blocks see them, which the resize step that replaced the old setup step no
-    # longer does itself. Both halves have to prepare a keyframe the same way or the conditioning latents encoded here
-    # would not be of the image the conditioner looked at.
+    # EXIF-transposed and in RGB, the same way the conditioner prepares it: the conditioning latents encoded here have
+    # to be of the image the conditioner looked at.
     def keyframe(path):
         return ImageOps.exif_transpose(Image.open(path)).convert("RGB") if path else None
 
@@ -403,8 +368,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
         with gr.Column():
             video = gr.Video(label="Video + soundtrack")
             report = gr.Markdown(visible=False)
-            # Only shown for a request that actually asked for a rewrite, so a plain request is not left with an
-            # empty panel. The accordion is an output for that reason: its visibility is part of the answer.
+            # An output, so it can be revealed only for a request that asked for a rewrite.
             with gr.Accordion("Upsampled prompt", open=False, visible=False) as upsampled_panel:
                 upsampled = gr.Textbox(show_label=False, lines=8, interactive=False)
 
@@ -425,9 +389,8 @@ with gr.Blocks(title="MiniMax-H3") as demo:
         cache_mode="lazy",
     )
 
-    # `upsample` is appended *after* every input that was already here and every existing input keeps its position, so
-    # a positional API client that predates it keeps working and simply takes the default. Same on the way out: the
-    # video and the report stay first and the upsampled prompt is appended last.
+    # `upsample` is last and defaults off, so a positional API client that predates it is unaffected; so is the
+    # output order, with the upsampled prompt appended after the video and the report.
     run.click(
         generate,
         [prompt, image, last_image, canvas, duration, steps, seed, upsample],

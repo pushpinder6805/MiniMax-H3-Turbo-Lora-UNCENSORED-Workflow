@@ -161,18 +161,14 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 ## Whose GPU quota pays
 
 Two cards are booked per request — this Space's denoise loop and the conditioner's forward — and both are billed to the
-**requesting user**, with nothing in this repository arranging it. `gradio_client` attaches the caller's own
-`x-ip-token` to every outgoing call by itself, reading it off gradio's `LocalContext` inside the event listener
-(`Client.send_data` -> `add_zero_gpu_headers`), and ZeroGPU's `/schedule` charges the booking to whatever that token
-identifies. Forwarding the header by hand is not needed and is actively worse: a cached `Client` would pin one stale
-token, which ZeroGPU refuses with `Expired ZeroGPU proxy token`.
+requesting user, with nothing here arranging it: `gradio_client` attaches the caller's own `x-ip-token` to every
+outgoing call, reading it off gradio's `LocalContext` inside the event listener (`Client.send_data` ->
+`add_zero_gpu_headers`), and ZeroGPU charges the booking to whatever that token identifies.
 
 A caller with no token to forward — a `gradio_client` script rather than a browser — leaves the conditioner's booking
-attributed to this Space's pod IP and its small shared quota. That path is why the conditioner books small: an
-unattributed caller may book at most 120 credits at a time and an `xlarge` booking costs **twice** its seconds
-(`_gpu_size_units`), so the conditioner books the encode (45 s) and a prompt upsample (60 s) as two separate calls,
-where one combined booking of the old 300 s would be — and was — refused outright with `The requested GPU duration
-(600s) is larger than the maximum allowed`.
+attributed to this Space's pod IP and its small shared quota. An unattributed caller may book at most 120 credits at a
+time and an `xlarge` booking costs twice its seconds, so the conditioner books the encode (45 s) and a prompt upsample
+(60 s) as two separate calls, each within that ceiling.
 
 ## Secrets
 
@@ -184,10 +180,8 @@ is a public Space called on the requesting user's own ZeroGPU token, never on an
 ## Where diffusers comes from
 
 MiniMax-H3 is modular-only and not in a released `diffusers`, so `requirements.txt` installs it from the canonical
-pull request, [huggingface/diffusers#14371](https://github.com/huggingface/diffusers/pull/14371), pinned to the
-**commit** `665f5782` (`refs/pull/14371/head` at deploy time) rather than to the moving `minimax-h3-refactor` branch.
+pull request, [huggingface/diffusers#14371](https://github.com/huggingface/diffusers/pull/14371), pinned to the commit
+`665f5782` (`refs/pull/14371/head`) rather than to the moving `minimax-h3-refactor` branch.
 
-That PR is a WIP: it needs **re-pinning whenever it updates**, and `h3_split_blocks.py` — which subclasses its block
-classes to cut the pipeline in two — has to be re-checked against the new head at the same time. The PR refactored
-the blocks into one workflow-selected pipeline, so block names and the shape of the split are exactly what a new head
-is liable to move.
+That PR is a WIP, so it needs re-pinning whenever it updates, and `h3_split_blocks.py` — which subclasses its block
+classes to cut the pipeline in two — has to be re-checked against the new head at the same time.

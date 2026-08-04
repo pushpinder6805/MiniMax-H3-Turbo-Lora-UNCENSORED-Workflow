@@ -62,9 +62,8 @@ import os
 from pathlib import Path
 
 AOTI = os.environ.get("H3_AOTI", "0") == "1"
-# A public **model** repo. It used to be a private dataset, which is why the repo type is still a variable: the
-# artifacts are keyed by quant/torch/arch under `<width>/torch<X.Y>/sm<cc>/<shape>` rather than laid out the way
-# `spaces.aoti_load` expects, so the download is done by hand either way (see `maybe_load`).
+# The artifacts are keyed by quant/torch/arch under `<width>/torch<X.Y>/sm<cc>/<shape>` rather than laid out the way
+# `spaces.aoti_load` expects, so the download is done by hand (see `maybe_load`).
 AOTI_REPO = os.environ.get("H3_AOTI_REPO", "multimodalart/minimax-h3-aoti")
 AOTI_REPO_TYPE = os.environ.get("H3_AOTI_REPO_TYPE", "model")
 # `dynamic` is the one package that serves every canvas, duration *and prompt*, and for bfloat16 it is what gets built:

@@ -1,14 +1,13 @@
 """The halves of a **split** MiniMax-H3 deployment, for both of its checkpoint partitions.
 
-MiniMax-H3 is modular-only. Since https://github.com/huggingface/diffusers/pull/14371 the whole model is *one*
-`MiniMaxH3Blocks` sequence whose branches are picked per request (and per `workflow=`) from the inputs:
+MiniMax-H3 is modular-only, and the whole model is one `MiniMaxH3Blocks` sequence whose branches are picked per
+request — and per `workflow=` — from the inputs:
 
     before_encode -> text_encoder -> vae_encoder -> denoise -> after_denoise -> decode
 
-where `before_encode`, `text_encoder`, `vae_encoder` and `denoise` are each an auto-block that switches on
-`references` (the `ref2va` workflow) versus the keyframe inputs (`t2va` / `fl2va`), and `denoise` is a whole
-sub-sequence — `prepare_layout -> prepare_latents -> set_timesteps -> denoise` — against `transformer` or
-`transformer_ref`.
+where `before_encode`, `text_encoder`, `vae_encoder` and `denoise` each switch on `references` (the `ref2va` workflow)
+versus the keyframe inputs (`t2va` / `fl2va`), and `denoise` is itself `prepare_layout -> prepare_latents ->
+set_timesteps -> denoise` against `transformer` or `transformer_ref`.
 
 The conditioner (a 62.14 GiB Qwen3-VL) and the denoiser (a 61.73 GiB transformer plus ~20.5 GiB of float32 VAEs) do
 not fit on one 95 GiB card unquantized, so this module cuts that sequence in two at the `text_encoder` step, once per
@@ -22,25 +21,15 @@ partition:
   * `MiniMaxH3Ref2VAConditionerBlocks` / `MiniMaxH3Ref2VAGeneratorBlocks` are the same cut through the `ref2va`
     branch, so one conditioner Space serves both partitions out of the weights it already holds.
 
-What the refactor moved, and what that means for the cut:
+`resize` / `setup` run on both sides on purpose. They own no pretrained component (PIL, decoded media and arithmetic),
+they resolve the canvas and prepare the keyframes or normalize the references — which the conditioner needs to build
+its vision blocks and the generator needs to encode with the VAEs. Running them twice over the same inputs is
+deterministic; both conditioner halves return the resolved `height` / `width` / `num_frames` anyway, so the caller
+pins them explicitly on the generating half.
 
-  * the old `MiniMaxH3SetupStep` is gone. Its keyframe half is now `MiniMaxH3ResizeStep` (wrapped in the conditional
-    `MiniMaxH3AutoResizeStep`, skipped entirely for a text-only request) and its geometry half moved *into*
-    `MiniMaxH3PrepareLayoutStep`, which lives on the denoising side. So the `t2va` / `fl2va` conditioner half no
-    longer resolves `num_frames` at all — the caller does, with `align_num_frames`, which is the one line of
-    arithmetic that used to come back in the plan.
-  * `MiniMaxH3Ref2VASetupStep` survived and still resolves the canvas *and* the frame count, but `num_frames` is now
-    required there: a request that leaves the duration to its single audio-bearing reference resolves it caller-side.
-  * unpacking the denoised rows moved out of the decoders into `MiniMaxH3AfterDenoiseStep`, so the generating halves
-    carry that step explicitly.
-  * `model_name` is `"minimax-h3"` on every block now — the `"minimax-h3-ref2va"` pipeline mapping was dropped when
-    the two blocksets became workflows of one pipeline.
-
-`resize` / `setup` run on both sides on purpose. They own no pretrained component (PIL, decoded media and
-arithmetic), they resolve the canvas and prepare the keyframes or normalize the references — which the conditioner
-needs to build its vision blocks and the generator needs to encode with the VAEs. Running them twice over the same
-inputs is deterministic; both conditioner halves return the resolved `height` / `width` / `num_frames` anyway, so the
-caller pins them explicitly on the generating half.
+Two things the blocks leave to the caller: a keyframe reaches them EXIF-transposed and in RGB, and the `t2va` /
+`fl2va` frame count is aligned to `17 * n + 5` before the call, since that arithmetic lives in the layout step on the
+denoising side of the cut. `ref2va` still resolves its own frame count, but requires one to be passed.
 
 Only *text* encoding is remote. `vae_encoder` / `reference_encoder` stay on the denoising side: they run the two
 autoencoders, which the conditioner Space does not hold.
@@ -68,8 +57,7 @@ from diffusers.modular_pipelines.modular_pipeline_utils import OutputParam
 def _wire_outputs(num_frames: bool = True) -> list[OutputParam]:
     """The wire format of the split, plus the plan the caller pins on the generating half.
 
-    `num_frames` is only declared by the `ref2va` half: its setup step is the one that still resolves the frame count,
-    while the keyframe half's own resolution moved into the layout step, on the other side of the cut.
+    `num_frames` is declared by the `ref2va` half alone: it is the one whose setup step resolves a frame count.
     """
     return [
         OutputParam.template("prompt_embeds"),
@@ -96,8 +84,7 @@ class MiniMaxH3ConditionerBlocks(SequentialPipelineBlocks):
         return (
             "The conditioner half of a split MiniMax-H3 deployment: puts the keyframes onto the target canvas and "
             "encodes MiniMax-H3's presentation of the request into the `prompt_embeds` / `text_token_tags` pair the "
-            "denoising half consumes. The frame count is the caller's to align — that arithmetic now lives in the "
-            "layout step, on the denoising side."
+            "denoising half consumes. The frame count is the caller's to align."
         )
 
     @property
