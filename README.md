@@ -158,6 +158,19 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 | `H3_GPU_DURATION` | `900` | Seconds per request; the pool applies a 1.5 duration factor. |
 | `H3_GPU_SIZE` | `xlarge` | ZeroGPU allocation size. `large` does not fit. |
 
+## Whose GPU quota pays
+
+Two cards are booked per request: this Space's denoise loop and the conditioner's forward. ZeroGPU attributes a
+booking to the `X-IP-Token` header of the request that triggered it, so this Space forwards the caller's token to the
+conditioner (`gradio_client.Client(..., headers={"X-IP-Token": ...})`, from the `gr.Request` gradio injects — the UI
+path and the `/generate` API path alike). One user's request then bills as one request across both halves, the way it
+would if this were a single Space, and no org token is ever spent on it.
+
+A caller the router cannot attribute — an unauthenticated API call — falls back to the conditioner's IP-based quota,
+whose ceiling is 120 credits. An `xlarge` booking costs **twice** its seconds there, so the conditioner keeps its
+reservation at 60 s (120 credits) for an encode; asking it to upsample a prompt books 120 s (240 credits) and needs a
+forwarded token.
+
 ## Secrets
 
 Nothing this Space loads is private any more: the weights are the public
