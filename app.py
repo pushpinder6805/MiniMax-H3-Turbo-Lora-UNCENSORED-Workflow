@@ -338,9 +338,9 @@ load_models()
 INTRO = """# MiniMax-H3
 
 <div align="center">
-  <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3"><strong>[ model ]</strong></a> &nbsp;
-  <a href="https://www.minimax.io/blog/minimax-h3"><strong>[ blog ]</strong></a> &nbsp;
-  <a href="https://huggingface.co/spaces/multimodalart/minimax-h3-reference"><strong>[ reference to video ]</strong></a>
+  <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ model ]</strong></a> &nbsp;
+  <a href="https://www.minimax.io/blog/minimax-h3" target="_blank" rel="noopener"><strong>[ blog ]</strong></a> &nbsp;
+  <a href="https://huggingface.co/spaces/multimodalart/minimax-h3-reference" target="_blank" rel="noopener"><strong>[ reference to video ]</strong></a>
 </div>
 
 **MiniMax-H3** is a 33B parameter state of the art video generation model that produces video and a
