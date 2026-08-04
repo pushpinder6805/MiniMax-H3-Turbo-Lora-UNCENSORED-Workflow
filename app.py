@@ -24,9 +24,6 @@ ATTENTION = os.environ.get("H3_ATTENTION", "_native_cudnn").lower()
 GPU_DURATION = int(os.environ.get("H3_GPU_DURATION", "900"))
 GPU_SIZE = os.environ.get("H3_GPU_SIZE", "xlarge")
 ON_SPACES = bool(os.environ.get("SPACE_ID"))
-# Used for one thing only: paying for the conditioner call when the caller's own token cannot. Everything
-# this Space downloads — the checkpoint and the AoTI packages — is public.
-HF_TOKEN = os.environ.get("HF_TOKEN")
 
 CANVASES = {
     # 16:9
@@ -186,46 +183,37 @@ def conditioner(ip_token: str | None = None, hf_token: str | None = None):
     key = (ip_token, hf_token)
     if key in CLIENTS:
         return CLIENTS[key]
-    client = Client(
-        CONDITIONER_SPACE,
-        token=hf_token,
-        headers={"X-IP-Token": ip_token} if ip_token else None,
-    )
+    # No token of this Space's own: the booking is meant to be the caller's, and an unattributed call is the
+    # fallback rather than a second identity to spend.
+    client = Client(CONDITIONER_SPACE, headers={"X-IP-Token": ip_token} if ip_token else None)
     if len(CLIENTS) >= 32:
         CLIENTS.pop(next(iter(CLIENTS)))
     CLIENTS[key] = client
     return client
 
 
-# What ZeroGPU says when an identity cannot pay for the booking, in any of its forms: a proxy token it will not
-# honour (`401`, surfaced as "Expired ZeroGPU proxy token"), a duration past what that identity may book, and an
-# exhausted quota. All three mean "try the next identity" rather than "fail the request".
+# What ZeroGPU says when an identity cannot pay for a booking: a proxy token its `/usage-approval` refused (`401`,
+# surfaced as "Expired ZeroGPU proxy token"), a duration past what that identity may book, and an exhausted quota.
 _UNPAYABLE = ("proxy token", "ZeroGPU quota", "larger than the maximum allowed", "GPU limit")
 
 
 def call_conditioner(ip_token, **arguments):
-    """One conditioner call, against the first ZeroGPU identity that can pay for it.
+    """One conditioner call, billed to **the requesting user**.
 
-    In order of preference:
+    ZeroGPU attributes a booking to the `X-IP-Token` of the request that triggered it: `/schedule` hands that token to
+    the Spaces API's `/usage-approval` together with the duration and the calling pod's IP, and nothing else — there is
+    no Space identity in that call, so a *valid* token minted anywhere is honoured and the user's own quota pays for
+    both halves of their request. That is the whole reason this Space forwards the header instead of spending a token
+    of its own.
 
-      1. **the caller's own forwarded `X-IP-Token`** — the request bills as one request across both halves and costs
-         this org nothing. Best effort: a proxy token minted for this Space is not necessarily honoured when it
-         arrives at another one, and ZeroGPU answers `401` when it is not.
-      2. **this Space's `HF_TOKEN`** — the booking is charged to the account that owns the Space, which has a real
-         quota. This is what carries the Space in practice.
-      3. **no token at all** — an IP-based free quota, shared by everything calling out of this Space's egress IP and
-         worth a couple of requests a day. A last resort, not a design.
-
-    The conditioner's own bookings are sized to fit even (3): it books an encode and a prompt upsample as two calls
-    of 45 s and 60 s, because an unattributed caller may book at most 60 s of `xlarge` at a time.
+    A token the Spaces API refuses (`401`) falls back to calling the conditioner with no token, which is billed to this
+    Space's pod IP off a small shared quota. That is a safety net, not the intended path: the log line
+    `conditioner call paid for by ...` records which one actually paid, so a Space that keeps falling back is visible.
     """
     api_name = arguments.pop("api_name")
-    attempts = []
+    attempts = [("no token, on this Space's shared IP quota", {})]
     if ip_token:
-        attempts.append(("the caller's forwarded ZeroGPU token", {"ip_token": ip_token}))
-    if HF_TOKEN:
-        attempts.append(("this Space's HF_TOKEN", {"hf_token": HF_TOKEN}))
-    attempts.append(("no token, on an IP quota", {}))
+        attempts.insert(0, ("the requesting user's own ZeroGPU token", {"ip_token": ip_token}))
 
     for index, (label, identity) in enumerate(attempts):
         try:
@@ -235,22 +223,38 @@ def call_conditioner(ip_token, **arguments):
         except Exception as error:
             if index == len(attempts) - 1 or not any(reason in str(error) for reason in _UNPAYABLE):
                 raise
-            print(f"[{LOG_TAG}] {label}: {error}; trying the next identity", flush=True)
+            print(f"[{LOG_TAG}] {label} was refused: {error}; falling back", flush=True)
             CLIENTS.pop((identity.get("ip_token"), identity.get("hf_token")), None)
 
 
 def ip_token_of(request) -> str | None:
-    """The caller's ZeroGPU identity, as the Spaces router put it on this request.
+    """The requesting user's ZeroGPU identity, as the Spaces router put it on this request.
 
-    Present on a browser request and on an API request the router could attribute; absent for a truly anonymous
-    caller, which then falls back to the conditioner's IP-based quota. Both the UI path and the `/generate` API path
-    reach this through the same `gr.Request` gradio injects for a parameter annotated with it.
+    Logged, decoded, on every request — never the token itself, only what it claims. ZeroGPU refuses a token its
+    `/usage-approval` considers expired, and that refusal is indistinguishable from a missing one in the outcome, so
+    the claims are what tell the two apart when a request ends up on the fallback quota. Both the UI path and the
+    `/generate` API path reach this through the same `gr.Request` gradio injects for a parameter annotated with it.
     """
     headers = getattr(request, "headers", None)
     token = None if headers is None else headers.get("x-ip-token")
-    print(f"[gen] conditioner call {'forwards the caller ZeroGPU token' if token else 'is anonymous (IP quota)'}", flush=True)
-    return token
+    if token is None:
+        print(f"[{LOG_TAG}] no X-IP-Token on this request; the conditioner call cannot be billed to the caller", flush=True)
+        return None
+    try:
+        import base64
+        import json
+        import time
 
+        payload = json.loads(base64.urlsafe_b64decode(f"{token.split('.')[1]}=="))
+        left = payload.get("exp", 0) - time.time()
+        print(
+            f"[{LOG_TAG}] X-IP-Token present: {left:.0f}s to expiry, claims "
+            f"{ {k: v for k, v in payload.items() if k in ('exp', 'iat', 'sub', 'aud', 'error', 'user')} }",
+            flush=True,
+        )
+    except Exception as error:  # a token that cannot be read is still worth forwarding; ZeroGPU is the judge
+        print(f"[{LOG_TAG}] X-IP-Token present but unreadable ({type(error).__name__}: {error})", flush=True)
+    return token
 
 def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False, ip_token=None):
     """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely.

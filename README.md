@@ -160,31 +160,29 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 
 ## Whose GPU quota pays
 
-Two cards are booked per request: this Space's denoise loop and the conditioner's forward. ZeroGPU attributes a
-booking to the identity of the request that triggered it, so the conditioner call tries three in order:
+Two cards are booked per request: this Space's denoise loop and the conditioner's forward, and **both are meant to be
+billed to the requesting user**. ZeroGPU attributes a booking to the `X-IP-Token` of the request that triggered it —
+its `/schedule` hands that token to the Spaces API together with the duration and the calling pod's IP, and nothing
+else, so there is no Space identity in the decision and a valid token minted anywhere is honoured. This Space
+therefore forwards the caller's header to the conditioner
+(`gradio_client.Client(..., headers={"X-IP-Token": ...})`, off the `gr.Request` gradio injects on
+the UI path and the `/generate` API path alike) rather than spending a token of its own.
 
-1. **the caller's own `X-IP-Token`**, forwarded off the `gr.Request` gradio injects (the UI path and the `/generate`
-   API path alike). The request then bills as one request across both halves and costs this org nothing. Best effort:
-   ZeroGPU answers `401` for a proxy token it will not honour — which is what a token minted for *this* Space looks
-   like arriving at another one — and `spaces` surfaces that as `Expired ZeroGPU proxy token`.
-2. **this Space's `HF_TOKEN`**, which charges the account that owns the Space and has a real quota. This is what
-   carries the Space in practice.
-3. **no token**, an IP-based free quota shared by everything calling out of this Space's egress IP. A last resort.
+A token ZeroGPU refuses — it answers `401`, which `spaces` surfaces as `Expired ZeroGPU proxy token` — falls back to
+calling the conditioner with no token at all, billed to this Space's pod IP off a small shared quota. That is a safety
+net rather than the intended path, and the log line `conditioner call paid for by ...` records which identity actually
+paid, next to a decoded dump of what the incoming token claimed.
 
-Any of ZeroGPU's "this identity cannot pay" answers — a refused proxy token, a duration past what the identity may
-book, an exhausted quota — moves on to the next identity instead of failing the request, and the log line
-`conditioner call paid for by ...` records which one paid.
-
-The conditioner is sized so that even (3) is legal: an unattributed caller may book at most 120 credits at a time and
-an `xlarge` booking costs **twice** its seconds, so the conditioner books the encode (45 s) and a prompt upsample
-(60 s) as **two separate calls**, where one combined booking would be refused outright.
+The conditioner is sized so that even the fallback is legal: an unattributed caller may book at most 120 credits at a
+time and an `xlarge` booking costs **twice** its seconds (`_gpu_size_units`), so the conditioner books the encode
+(45 s) and a prompt upsample (60 s) as **two separate calls**, where one combined booking would be refused outright.
 
 ## Secrets
 
-`HF_TOKEN` — used for exactly one thing: paying for the conditioner call when the caller's own ZeroGPU token cannot
-(see above). Everything this Space downloads is public: the [`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3)
-checkpoint and the [`multimodalart/minimax-h3-aoti`](https://huggingface.co/multimodalart/minimax-h3-aoti) packages.
-Without it, a call the caller cannot pay for falls back to a shared IP quota worth a couple of requests a day.
+None are required. Everything this Space downloads is public — the
+[`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3) checkpoint and the
+[`multimodalart/minimax-h3-aoti`](https://huggingface.co/multimodalart/minimax-h3-aoti) packages — and the conditioner
+is a public Space called on the requesting user's own ZeroGPU token, never on an org token.
 
 ## Where diffusers comes from
 
