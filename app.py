@@ -51,7 +51,9 @@ CANVASES = {
 }
 DEFAULT_CANVAS = "960x544 · 16:9 fast"
 FPS, FRAMES_PER_CHUNK, LATENTS_PER_CHUNK = 24, 17, 5
-MAX_UI_DURATION = 14
+# MiniMax-H3 generates 5 to 15 seconds, and it is the snapped frame count that has to hold for the ceiling: 15 s is
+# 360 frames, which rounds up to 362, i.e. 15.083 s, and is refused.
+MIN_UI_DURATION, MAX_UI_DURATION = 5, 14
 
 
 def snap_frames(seconds: float) -> int:
@@ -383,7 +385,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
             run = gr.Button("Generate", variant="primary")
             with gr.Accordion("Advanced options", open=False):
                 canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
-                duration = gr.Slider(label="Duration (s)", minimum=2, maximum=MAX_UI_DURATION, step=1, value=5)
+                duration = gr.Slider(label="Duration (s)", minimum=MIN_UI_DURATION, maximum=MAX_UI_DURATION, step=1, value=5)
                 steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
                 seed = gr.Number(label="Seed", value=42, precision=0)
 
