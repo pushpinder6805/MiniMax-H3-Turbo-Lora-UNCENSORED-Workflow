@@ -210,6 +210,30 @@ def ip_token_of(request) -> str | None:
     return token
 
 
+LOG_TAG = "gen"
+
+
+def call_conditioner(ip_token, **arguments):
+    """One conditioner call, on the caller's ZeroGPU identity when that is accepted and anonymously when it is not.
+
+    Forwarding is best effort. ZeroGPU's `/schedule` answers `401` for a proxy token it will not honour — which is
+    what a token minted for *this* Space looks like when it arrives at the conditioner — and `spaces` surfaces that as
+    `Expired ZeroGPU proxy token`. So the forwarded call is tried first, and a rejected token falls back to no token
+    at all rather than failing the request. The conditioner's own bookings are sized to fit the unattributed ceiling,
+    so the fallback is a working path and not a degraded one.
+    """
+    api_name = arguments.pop("api_name")
+    if ip_token is not None:
+        try:
+            return conditioner(ip_token).predict(**arguments, api_name=api_name)
+        except Exception as error:
+            if "proxy token" not in str(error):
+                raise
+            print(f"[{LOG_TAG}] the forwarded ZeroGPU token was refused ({error}); retrying anonymously", flush=True)
+            CLIENTS.pop(ip_token, None)
+    return conditioner(None).predict(**arguments, api_name=api_name)
+
+
 def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False, ip_token=None):
     """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely.
 
@@ -221,7 +245,8 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewri
     from gradio_client import handle_file
     from safetensors import safe_open
 
-    path, plan = conditioner(ip_token).predict(
+    path, plan = call_conditioner(
+        ip_token,
         prompt=prompt,
         image_path=handle_file(image_path) if image_path else None,
         last_image_path=handle_file(last_image_path) if last_image_path else None,

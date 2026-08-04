@@ -162,14 +162,18 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 
 Two cards are booked per request: this Space's denoise loop and the conditioner's forward. ZeroGPU attributes a
 booking to the `X-IP-Token` header of the request that triggered it, so this Space forwards the caller's token to the
-conditioner (`gradio_client.Client(..., headers={"X-IP-Token": ...})`, from the `gr.Request` gradio injects — the UI
-path and the `/generate` API path alike). One user's request then bills as one request across both halves, the way it
-would if this were a single Space, and no org token is ever spent on it.
+conditioner (`gradio_client.Client(..., headers={"X-IP-Token": ...})`, off the `gr.Request` gradio injects — the UI
+path and the `/generate` API path alike). When ZeroGPU honours it, one user's request bills as one request across both
+halves and no org token is spent on it.
 
-A caller the router cannot attribute — an unauthenticated API call — falls back to the conditioner's IP-based quota,
-whose ceiling is 120 credits. An `xlarge` booking costs **twice** its seconds there, so the conditioner keeps its
-reservation at 60 s (120 credits) for an encode; asking it to upsample a prompt books 120 s (240 credits) and needs a
-forwarded token.
+It is best effort, though: ZeroGPU answers `401` for a proxy token it will not honour, which `spaces` surfaces as
+`Expired ZeroGPU proxy token`, and a token minted for one Space arriving at another is exactly that case on the API
+path. So a refused token falls back to calling the conditioner with no token at all, on an IP-based quota.
+
+That fallback is a working path rather than a degraded one, because the conditioner is sized for it. An unattributed
+caller may book at most 120 credits at a time and an `xlarge` booking costs **twice** its seconds, i.e. 60 s — so the
+conditioner books the encode (45 s) and a prompt upsample (60 s) as **two separate calls**, each under the ceiling,
+where one combined booking would be refused outright.
 
 ## Secrets
 
