@@ -65,8 +65,7 @@ PIPE = None
 MANAGER = None
 LOAD_ERROR: str | None = None
 LOADED_IN: float | None = None
-# One `gradio_client.Client` per forwarded token; see `conditioner`.
-CLIENTS: dict[str | None, object] = {}
+CLIENT = None
 
 
 def status() -> str:
@@ -171,35 +170,23 @@ def _arm_decode_hooks(pipe):
         module.decode = armed
 
 
-def conditioner(ip_token: str | None = None):
-    """The other half, over the gradio API, billed to the requesting user.
+def conditioner():
+    """The other half, over the gradio API. Cached — building a `Client` costs a round trip to the Space config.
 
-    ZeroGPU attributes a booking to the `X-IP-Token` of the request that triggered it: `/schedule` hands that token to
-    the Spaces API together with the duration and the calling pod's IP and nothing else — there is no Space identity in
-    the decision — so forwarding the caller's header makes the user's own quota pay for both halves of their request,
-    the way it would if this were a single Space.
-
-    Cached per token: building a `Client` costs a round trip to the Space config, and a token is per user session.
+    No token is passed and none has to be: `gradio_client` attaches the caller's own ZeroGPU token itself, per call,
+    by reading the `x-ip-token` of the request being served off gradio's `LocalContext` (`Client.send_data` ->
+    `add_zero_gpu_headers`). So calling this from inside an event listener — which is the only place it is called —
+    bills the conditioner's booking to the user who asked for the video, exactly as this Space's own booking is, and
+    forwarding the header by hand would only pin a stale token onto a cached client.
     """
-    from gradio_client import Client
+    global CLIENT
+    if CLIENT is None:
+        from gradio_client import Client
 
-    if ip_token not in CLIENTS:
-        if len(CLIENTS) >= 32:
-            CLIENTS.pop(next(iter(CLIENTS)))
-        CLIENTS[ip_token] = Client(CONDITIONER_SPACE, headers={"X-IP-Token": ip_token} if ip_token else None)
-    return CLIENTS[ip_token]
+        CLIENT = Client(CONDITIONER_SPACE)
+    return CLIENT
 
-
-def ip_token_of(request) -> str | None:
-    """The requesting user's ZeroGPU identity, as the Spaces router put it on this request.
-
-    The UI path and the `/generate` API path both reach this through the `gr.Request` gradio injects for a parameter
-    annotated with it.
-    """
-    headers = getattr(request, "headers", None)
-    return None if headers is None else headers.get("x-ip-token")
-
-def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False, ip_token=None):
+def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False):
     """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely.
 
     `rewrite_prompt` is the conditioner's prompt upsampling: it rewrites the request into MiniMax-H3's trained format
@@ -210,7 +197,7 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewri
     from gradio_client import handle_file
     from safetensors import safe_open
 
-    path, plan = conditioner(ip_token).predict(
+    path, plan = conditioner().predict(
         prompt=prompt,
         image_path=handle_file(image_path) if image_path else None,
         last_image_path=handle_file(last_image_path) if last_image_path else None,
@@ -274,7 +261,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True), request: gr.Request | None = None):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
     """One request. `upsample` is appended last and defaults off, so an existing API client is untouched by it."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
@@ -292,8 +279,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     progress(0.0, desc=f"Upsampling the prompt on {CONDITIONER_SPACE} ..." if upsample else f"Conditioning on {CONDITIONER_SPACE} ...")
     conditioned = time.time()
     prompt_embeds, text_token_tags, metadata, plan = encode_remote(
-        prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample,
-        ip_token=ip_token_of(request),
+        prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample
     )
     condition_seconds = time.time() - conditioned
     height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))

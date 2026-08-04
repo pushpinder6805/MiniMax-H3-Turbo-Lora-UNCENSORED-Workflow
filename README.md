@@ -160,22 +160,19 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 
 ## Whose GPU quota pays
 
-Two cards are booked per request: this Space's denoise loop and the conditioner's forward, and **both are meant to be
-billed to the requesting user**. ZeroGPU attributes a booking to the `X-IP-Token` of the request that triggered it —
-its `/schedule` hands that token to the Spaces API together with the duration and the calling pod's IP, and nothing
-else, so there is no Space identity in the decision and a valid token minted anywhere is honoured. This Space
-therefore forwards the caller's header to the conditioner
-(`gradio_client.Client(..., headers={"X-IP-Token": ...})`, off the `gr.Request` gradio injects on
-the UI path and the `/generate` API path alike) rather than spending a token of its own.
+Two cards are booked per request — this Space's denoise loop and the conditioner's forward — and both are billed to the
+**requesting user**, with nothing in this repository arranging it. `gradio_client` attaches the caller's own
+`x-ip-token` to every outgoing call by itself, reading it off gradio's `LocalContext` inside the event listener
+(`Client.send_data` -> `add_zero_gpu_headers`), and ZeroGPU's `/schedule` charges the booking to whatever that token
+identifies. Forwarding the header by hand is not needed and is actively worse: a cached `Client` would pin one stale
+token, which ZeroGPU refuses with `Expired ZeroGPU proxy token`.
 
-A token ZeroGPU refuses — it answers `401`, which `spaces` surfaces as `Expired ZeroGPU proxy token` — falls back to
-calling the conditioner with no token at all, billed to this Space's pod IP off a small shared quota. That is a safety
-net rather than the intended path, and the log line `conditioner call paid for by ...` records which identity actually
-paid, next to a decoded dump of what the incoming token claimed.
-
-The conditioner is sized so that even the fallback is legal: an unattributed caller may book at most 120 credits at a
-time and an `xlarge` booking costs **twice** its seconds (`_gpu_size_units`), so the conditioner books the encode
-(45 s) and a prompt upsample (60 s) as **two separate calls**, where one combined booking would be refused outright.
+A caller with no token to forward — a `gradio_client` script rather than a browser — leaves the conditioner's booking
+attributed to this Space's pod IP and its small shared quota. That path is why the conditioner books small: an
+unattributed caller may book at most 120 credits at a time and an `xlarge` booking costs **twice** its seconds
+(`_gpu_size_units`), so the conditioner books the encode (45 s) and a prompt upsample (60 s) as two separate calls,
+where one combined booking of the old 300 s would be — and was — refused outright with `The requested GPU duration
+(600s) is larger than the maximum allowed`.
 
 ## Secrets
 
