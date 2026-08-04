@@ -17,20 +17,19 @@ Joint video **and** soundtrack out of a single denoising pass, at **bfloat16 wit
 
 This Space is the denoising half: the 61.73 GiB transformer and the two autoencoders. The 62.14 GiB Qwen3-VL
 conditioner runs in
-[`minimax-h3-conditioner`](https://huggingface.co/spaces/diffusers-internal-dev/minimax-h3-conditioner), which this
-Space calls over the gradio API for every request.
+[`qwen3vl-conditioner`](https://huggingface.co/spaces/multimodalart/qwen3vl-conditioner), which this
+Space calls over the gradio API for every request. The weights are the public
+[`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3) diffusers checkpoint.
 
 ## Why split
 
 MiniMax-H3 is 195.9 GiB in bfloat16 and a ZeroGPU Space is evicted at **150 GB of storage**. An unquantized single
-Space is therefore impossible — the existing demos
-([`minimax-h3`](https://huggingface.co/spaces/diffusers-internal-dev/minimax-h3),
-[`-fp8`](https://huggingface.co/spaces/diffusers-internal-dev/minimax-h3-fp8)) run NVFP4 and float8 weights for that
-reason alone. Cut the `MiniMaxH3Blocks` sequence at its `text_encoder` step and both halves fit unquantized:
+Space is therefore impossible, which is why quantized demos of it run NVFP4 or float8 weights. Cut the
+`MiniMaxH3Blocks` sequence at its `text_encoder` step and both halves fit unquantized:
 
 | Space | Subfolders | Download | Resident |
 |---|---|---|---|
-| [`minimax-h3-conditioner`](https://huggingface.co/spaces/diffusers-internal-dev/minimax-h3-conditioner) | `text_encoder/` + `tokenizer/` + `processor/` | 66.7 GB | 62.15 GiB bf16 |
+| [`qwen3vl-conditioner`](https://huggingface.co/spaces/multimodalart/qwen3vl-conditioner) | `text_encoder/` + `tokenizer/` + `processor/` | 66.7 GB | 62.15 GiB bf16 |
 | this one | `transformer/` + `vae/` + `audio_vae/` | 77.3 GB | 61.73 GiB bf16 + 10.43 GiB float32 |
 
 Besides the quality argument, unquantized weights are the ones AoTI can export; an NVFP4 checkpoint cannot be
@@ -59,11 +58,14 @@ Space pays, where the whole cost is the traffic auto-offload has to move.
 
 ## How the split is expressed
 
-`MiniMaxH3Blocks` is a `SequentialPipelineBlocks` of eight steps:
+`MiniMaxH3Blocks` is a `SequentialPipelineBlocks` whose branches are picked per request — and per `workflow=` — from
+the inputs:
 
 ```
-setup -> text_encoder -> vae_encoder -> prepare_layout -> prepare_latents -> set_timesteps -> denoise -> decode
+before_encode -> text_encoder -> vae_encoder -> denoise -> after_denoise -> decode
 ```
+
+where `denoise` is itself `prepare_layout -> prepare_latents -> set_timesteps -> denoise`.
 
 `h3_split_blocks.py` subclasses it with the `text_encoder` step removed. Dropping the step drops the three
 components it declares, so `load_components` resolves `transformer` / `vae` / `audio_vae` / the two schedulers out of
@@ -71,7 +73,7 @@ the shared `modular_model_index.json` and never fetches the conditioner — and 
 become ordinary required inputs of the pipeline call:
 
 ```py
-pipe = MiniMaxH3GeneratorBlocks().init_pipeline("diffusers-internal-dev/MiniMax-H3")
+pipe = MiniMaxH3GeneratorBlocks().init_pipeline("MiniMaxAI/MiniMax-H3")
 pipe.load_components(dtype=torch.bfloat16)
 state = pipe(prompt_embeds=..., text_token_tags=..., height=768, width=1344, num_frames=124, num_inference_steps=30)
 ```
@@ -80,10 +82,12 @@ The wire format is exactly those two tensors — `(1, num_text_tokens, 5120)` bf
 carried as one safetensors file with the resolved `height` / `width` / `num_frames` in its metadata header. A
 text-only request is 246 KB of it; one 768x1344 keyframe adds 1016 vision rows and takes it to 10.7 MB.
 
-The `setup` step runs on **both** halves. It owns no component (PIL and arithmetic) and it resolves the canvas, the
-`17 * n + 5` frame count and the keyframes placed onto that canvas — which the conditioner needs to build its vision
-blocks and this Space needs to encode with the video VAE. It is deterministic, and the conditioner returns the plan
-it resolved so this Space pins the same canvas rather than re-deriving it.
+The keyframe `resize` step runs on **both** halves. It owns no pretrained component (PIL and arithmetic) and it puts
+the keyframes onto the target canvas — which the conditioner needs to build its vision blocks and this Space needs to
+encode with the video VAE. It is deterministic, and the conditioner returns the plan it resolved so this Space pins
+the same canvas rather than re-deriving it. Two things that step no longer does, and that both halves therefore do
+themselves: EXIF-transposing a keyframe into upright RGB, and snapping `num_frames` to `17 * n + 5` — the frame count
+is resolved by the layout step, which lives on this side of the cut.
 
 ## Nothing is paid for with GPU time
 
@@ -147,18 +151,25 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `H3_CONDITIONER` | `diffusers-internal-dev/minimax-h3-conditioner` | The Space this one asks for embeddings. |
+| `H3_MODEL_REPO` | `MiniMaxAI/MiniMax-H3` | The diffusers-layout checkpoint. Public. |
+| `H3_CONDITIONER` | `multimodalart/qwen3vl-conditioner` | The Space this one asks for embeddings. |
 | `H3_PLACEMENT` | `lazy` | `lazy` moves all 72.16 GiB onto the card on the first GPU call and leaves it there; `offload` hands placement to `ComponentsManager.enable_auto_cpu_offload` instead. |
 | `H3_ATTENTION` | `_native_cudnn` | cuDNN's fused kernel, 10–20% faster than the SDPA default and needs nothing installed. flash-attention 3 is sm90-only and this pool is sm120. |
 | `H3_GPU_DURATION` | `900` | Seconds per request; the pool applies a 1.5 duration factor. |
 | `H3_GPU_SIZE` | `xlarge` | ZeroGPU allocation size. `large` does not fit. |
 
-## Required secret
+## Secrets
 
-`HF_TOKEN` — `diffusers-internal-dev/MiniMax-H3` is private, and so is the conditioner Space this one calls.
+The weights and the conditioner Space are both public, so neither needs a token. `HF_TOKEN` is still read by
+`h3_aoti`, whose compiled-package repository is private — without it, set `H3_AOTI=0`.
 
 ## Where diffusers comes from
 
-MiniMax-H3 is modular-only and not in a released `diffusers`, so the integration branch's `src/diffusers` tree is
-vendored here as a top-level `diffusers/` package; the working directory comes first on `sys.path`, so there is no
-install step. `requirements.txt` only carries what that tree imports.
+MiniMax-H3 is modular-only and not in a released `diffusers`, so `requirements.txt` installs it from the canonical
+pull request, [huggingface/diffusers#14371](https://github.com/huggingface/diffusers/pull/14371), pinned to the
+**commit** `665f5782` (`refs/pull/14371/head` at deploy time) rather than to the moving `minimax-h3-refactor` branch.
+
+That PR is a WIP: it needs **re-pinning whenever it updates**, and `h3_split_blocks.py` — which subclasses its block
+classes to cut the pipeline in two — has to be re-checked against the new head at the same time. The PR refactored
+the blocks into one workflow-selected pipeline, so block names and the shape of the split are exactly what a new head
+is liable to move.

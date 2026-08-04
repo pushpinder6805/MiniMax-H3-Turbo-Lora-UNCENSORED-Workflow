@@ -13,7 +13,7 @@ import traceback
 import spaces
 import gradio as gr
 
-MODEL_REPO = os.environ.get("H3_MODEL_REPO", "diffusers-internal-dev/MiniMax-H3")
+MODEL_REPO = os.environ.get("H3_MODEL_REPO", "MiniMaxAI/MiniMax-H3")
 CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
 # `lazy` moves all 72.16 GiB onto the card on the first GPU call and leaves it there; `offload` hands placement to
 # `ComponentsManager.enable_auto_cpu_offload` instead. Neither puts anything on the card at *startup*, which is
@@ -85,8 +85,9 @@ def load_models() -> str | None:
     """Load the denoising half. At **startup**, but *not* onto the card.
 
     `MiniMaxH3GeneratorBlocks` declares `transformer`, `vae`, `audio_vae`, `scheduler`, `audio_scheduler` and
-    `video_processor`, so `load_components` fetches exactly those subfolders out of the shared
-    `modular_model_index.json` — `text_encoder/` and `transformer_ref/` are never touched.
+    `video_processor` as its pretrained components (plus an `image_processor` built from config), so
+    `load_components` fetches exactly those subfolders out of the shared `modular_model_index.json` —
+    `text_encoder/` and `transformer_ref/` are never touched.
 
     Both autoencoders carry `_keep_in_fp32_modules` over every module, so the `dtype` below is refused for them and
     they stay float32: a bfloat16 audio VAE decodes the soundtrack roughly 20 dB too quiet.
@@ -105,11 +106,6 @@ def load_models() -> str | None:
     if PIPE is not None or LOAD_ERROR is not None:
         return LOAD_ERROR
 
-    token = os.environ.get("HF_TOKEN")
-    if not token:
-        LOAD_ERROR = f"**`HF_TOKEN` secret is missing** and `{MODEL_REPO}` is private. Add it and restart."
-        return LOAD_ERROR
-
     started = time.time()
     try:
         import torch
@@ -121,7 +117,9 @@ def load_models() -> str | None:
         blocks = MiniMaxH3GeneratorBlocks()
         print(f"[gen] loading {[c.name for c in blocks.expected_components]} from {MODEL_REPO} ...", flush=True)
         pipe = blocks.init_pipeline(MODEL_REPO, components_manager=manager, collection="h3")
-        pipe.load_components(dtype=torch.bfloat16, token=token)
+        # `MiniMaxAI/MiniMax-H3` is public, so the weights are fetched without a token. `HF_TOKEN` is still read by
+        # `h3_aoti`, whose compiled-package repository is not.
+        pipe.load_components(dtype=torch.bfloat16)
         pipe.transformer.set_attention_backend(ATTENTION)
 
         # Still startup, still free: an AoTI package carries no weights and opens its compiled archive lazily inside
@@ -182,8 +180,14 @@ def conditioner():
     return CLIENT
 
 
-def encode_remote(prompt, image_path, last_image_path, canvas, num_frames):
-    """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely."""
+def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False):
+    """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely.
+
+    `rewrite_prompt` is the conditioner's prompt upsampling: it rewrites the request into MiniMax-H3's trained format
+    with its own Qwen3-VL and encodes *that*, handing the rewrite back under the plan's `refined_prompt`. It runs on
+    the conditioner's GPU booking, and this whole call happens before `_generate` books a card here, so it costs this
+    Space's `get_duration` nothing.
+    """
     from gradio_client import handle_file
     from safetensors import safe_open
 
@@ -193,6 +197,7 @@ def encode_remote(prompt, image_path, last_image_path, canvas, num_frames):
         last_image_path=handle_file(last_image_path) if last_image_path else None,
         canvas=canvas,
         num_frames=num_frames,
+        rewrite_prompt=bool(rewrite_prompt),
         api_name="/encode",
     )
     with safe_open(path, framework="pt") as handle:
@@ -250,7 +255,8 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, progress=gr.Progress(track_tqdm=True)):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
+    """One request. `upsample` is appended last and defaults off, so an existing API client is untouched by it."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
     if PIPE is None:
@@ -258,27 +264,34 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     if not prompt or not prompt.strip():
         raise gr.Error("MiniMax-H3 always takes a prompt, keyframes or not.")
 
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     from diffusers.utils import encode_video
 
     num_frames = snap_frames(duration)
 
-    progress(0.0, desc=f"Conditioning on {CONDITIONER_SPACE} ...")
+    progress(0.0, desc=f"Upsampling the prompt on {CONDITIONER_SPACE} ..." if upsample else f"Conditioning on {CONDITIONER_SPACE} ...")
     conditioned = time.time()
     prompt_embeds, text_token_tags, metadata, plan = encode_remote(
-        prompt, image_path, last_image_path, canvas, num_frames
+        prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample
     )
     condition_seconds = time.time() - conditioned
     height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
+    refined = plan.get("refined_prompt") or ""
+
+    # EXIF-transposed and in RGB before the blocks see them, which the resize step that replaced the old setup step no
+    # longer does itself. Both halves have to prepare a keyframe the same way or the conditioning latents encoded here
+    # would not be of the image the conditioner looked at.
+    def keyframe(path):
+        return ImageOps.exif_transpose(Image.open(path)).convert("RGB") if path else None
 
     progress(0.1, desc=f"Denoising {steps} steps at {width}x{height}, {num_frames} frames ...")
     started = time.time()
     frames, audio, sampling_rate = _generate(
         prompt_embeds,
         text_token_tags,
-        Image.open(image_path) if image_path else None,
-        Image.open(last_image_path) if last_image_path else None,
+        keyframe(image_path),
+        keyframe(last_image_path),
         height,
         width,
         num_frames,
@@ -294,11 +307,12 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
 
     report = (
         f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} steps · "
-        f"conditioner {condition_seconds:.0f}s ({plan['num_text_tokens']} tokens) · "
+        f"conditioner {condition_seconds:.0f}s ({plan['num_text_tokens']} tokens"
+        f"{', upsampled' if refined else ''}) · "
         f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
-    return path, report
+    return path, report, refined
 
 
 
@@ -378,10 +392,22 @@ with gr.Blocks(title="MiniMax-H3") as demo:
                 duration = gr.Slider(label="Duration (s)", minimum=2, maximum=MAX_UI_DURATION, step=1, value=5)
                 steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
                 seed = gr.Number(label="Seed", value=42, precision=0)
-            
+                upsample = gr.Checkbox(
+                    label="Upsample prompt",
+                    value=False,
+                    info="Rewrites the prompt into the model's trained format with the conditioner's Qwen3-VL before encoding.",
+                )
+
         with gr.Column():
             video = gr.Video(label="Video + soundtrack")
             report = gr.Markdown(visible=False)
+            with gr.Accordion("Upsampled prompt", open=False):
+                upsampled = gr.Textbox(
+                    show_label=False,
+                    lines=8,
+                    interactive=False,
+                    placeholder="Turn on “Upsample prompt” to see the rewrite that was encoded.",
+                )
 
     image.upload(_fit_keyframe, [image, canvas], [image, canvas])
 
@@ -394,16 +420,19 @@ with gr.Blocks(title="MiniMax-H3") as demo:
             ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", "1344x768 · 16:9 full"],
         ],
         inputs=[prompt, image, last_image, canvas],
-        outputs=[video, report],
+        outputs=[video, report, upsampled],
         fn=generate,
         cache_examples=True,
         cache_mode="lazy",
     )
 
+    # `upsample` is appended *after* every input that was already here and every existing input keeps its position, so
+    # a positional API client that predates it keeps working and simply takes the default. Same on the way out: the
+    # video and the report stay first and the upsampled prompt is appended last.
     run.click(
         generate,
-        [prompt, image, last_image, canvas, duration, steps, seed],
-        [video, report],
+        [prompt, image, last_image, canvas, duration, steps, seed, upsample],
+        [video, report, upsampled],
         api_name="generate",
     )
 
