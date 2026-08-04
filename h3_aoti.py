@@ -2,7 +2,7 @@
 
 Shared byte-identically by every MiniMax-H3 Space. A Space only ever calls `maybe_load()`; the compile path runs from
 the debug Space's "Compile (AoTI)" tab, or off-Space from `job_bf16_aoti.py` on an `rtx-pro-6000` Job, and pushes its
-artifacts to `diffusers-internal-dev/minimax-h3-aoti` under `<width>/torch<X.Y>/sm<cc>/<shape>`.
+artifacts to `multimodalart/minimax-h3-aoti` under `<width>/torch<X.Y>/sm<cc>/<shape>`.
 
 What is measured, so nobody has to guess whether this is worth turning on. Unquantized bfloat16, 124 frames,
 everything resident, one dynamic-sequence package serving every row — on an RTX PRO 6000 Blackwell, torch 2.11,
@@ -62,8 +62,11 @@ import os
 from pathlib import Path
 
 AOTI = os.environ.get("H3_AOTI", "0") == "1"
-AOTI_REPO = os.environ.get("H3_AOTI_REPO", "diffusers-internal-dev/minimax-h3-aoti")
-AOTI_REPO_TYPE = os.environ.get("H3_AOTI_REPO_TYPE", "dataset")
+# A public **model** repo. It used to be a private dataset, which is why the repo type is still a variable: the
+# artifacts are keyed by quant/torch/arch under `<width>/torch<X.Y>/sm<cc>/<shape>` rather than laid out the way
+# `spaces.aoti_load` expects, so the download is done by hand either way (see `maybe_load`).
+AOTI_REPO = os.environ.get("H3_AOTI_REPO", "multimodalart/minimax-h3-aoti")
+AOTI_REPO_TYPE = os.environ.get("H3_AOTI_REPO_TYPE", "model")
 # `dynamic` is the one package that serves every canvas, duration *and prompt*, and for bfloat16 it is what gets built:
 # a dynamic sequence dimension exports and compiles cleanly (measured on an rtx-pro-6000 Job, torch 2.11). It has to be
 # dynamic to be useful at all — `build_packed_sequence` pads nothing, so
@@ -211,8 +214,8 @@ def maybe_load(transformer) -> None:
     """Patch the block stack with its compiled package. Once, and safe to call at **startup**.
 
     Nothing here touches a GPU: the download is CPU work and the `.pt2` archive is not opened until the first forward,
-    which happens inside the `@spaces.GPU` call. Proven on the pool — `diffusers-internal-dev/minimax-h3-generator-aoti`
-    loads `bf16/torch2.11/sm120/dynamic` at startup, patches all 50 blocks, and generates.
+    which happens inside the `@spaces.GPU` call. Proven on the pool: `bf16/torch2.11/sm120/dynamic` loads at startup,
+    patches all 50 blocks, and generates. The repo is public, so no token is passed for it.
     """
     if not AOTI or id(transformer) in _LOADED:
         return
@@ -226,7 +229,6 @@ def maybe_load(transformer) -> None:
         repo_id=AOTI_REPO,
         repo_type=AOTI_REPO_TYPE,
         allow_patterns=f"{key}/package/*",
-        token=os.environ.get("HF_TOKEN"),
     )
     package_dir = Path(local) / key / "package"
     if not package_dir.is_dir():
@@ -420,7 +422,7 @@ def upload(package_dir: str | os.PathLike[str], key: str) -> str:
     if not token:
         raise RuntimeError("`HF_TOKEN` is needed to push the AoTI package.")
     api = HfApi(token=token)
-    api.create_repo(repo_id=AOTI_REPO, repo_type=AOTI_REPO_TYPE, private=True, exist_ok=True)
+    api.create_repo(repo_id=AOTI_REPO, repo_type=AOTI_REPO_TYPE, private=False, exist_ok=True)
     api.upload_folder(
         folder_path=str(package_dir),
         path_in_repo=f"{key}/package",

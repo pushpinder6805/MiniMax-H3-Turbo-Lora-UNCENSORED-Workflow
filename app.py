@@ -117,8 +117,8 @@ def load_models() -> str | None:
         blocks = MiniMaxH3GeneratorBlocks()
         print(f"[gen] loading {[c.name for c in blocks.expected_components]} from {MODEL_REPO} ...", flush=True)
         pipe = blocks.init_pipeline(MODEL_REPO, components_manager=manager, collection="h3")
-        # `MiniMaxAI/MiniMax-H3` is public, so the weights are fetched without a token. `HF_TOKEN` is still read by
-        # `h3_aoti`, whose compiled-package repository is not.
+        # Every repository this Space reads is public — the checkpoint, the AoTI packages and the conditioner
+        # Space — so no token is passed anywhere.
         pipe.load_components(dtype=torch.bfloat16)
         pipe.transformer.set_attention_backend(ATTENTION)
 
@@ -312,7 +312,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
-    return path, report, refined
+    return path, report, refined, gr.update(visible=bool(refined))
 
 
 
@@ -383,6 +383,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
                 lines=3,
                 value="A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
             )
+            upsample = gr.Checkbox(label="Upsample prompt", value=False)
             with gr.Row():
                 image = gr.Image(label="First frame (optional)", type="filepath")
                 last_image = gr.Image(label="Last frame (optional)", type="filepath")
@@ -392,22 +393,14 @@ with gr.Blocks(title="MiniMax-H3") as demo:
                 duration = gr.Slider(label="Duration (s)", minimum=2, maximum=MAX_UI_DURATION, step=1, value=5)
                 steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
                 seed = gr.Number(label="Seed", value=42, precision=0)
-                upsample = gr.Checkbox(
-                    label="Upsample prompt",
-                    value=False,
-                    info="Rewrites the prompt into the model's trained format with the conditioner's Qwen3-VL before encoding.",
-                )
 
         with gr.Column():
             video = gr.Video(label="Video + soundtrack")
             report = gr.Markdown(visible=False)
-            with gr.Accordion("Upsampled prompt", open=False):
-                upsampled = gr.Textbox(
-                    show_label=False,
-                    lines=8,
-                    interactive=False,
-                    placeholder="Turn on “Upsample prompt” to see the rewrite that was encoded.",
-                )
+            # Only shown for a request that actually asked for a rewrite, so a plain request is not left with an
+            # empty panel. The accordion is an output for that reason: its visibility is part of the answer.
+            with gr.Accordion("Upsampled prompt", open=False, visible=False) as upsampled_panel:
+                upsampled = gr.Textbox(show_label=False, lines=8, interactive=False)
 
     image.upload(_fit_keyframe, [image, canvas], [image, canvas])
 
@@ -420,7 +413,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
             ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", "1344x768 · 16:9 full"],
         ],
         inputs=[prompt, image, last_image, canvas],
-        outputs=[video, report, upsampled],
+        outputs=[video, report, upsampled, upsampled_panel],
         fn=generate,
         cache_examples=True,
         cache_mode="lazy",
@@ -432,7 +425,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
     run.click(
         generate,
         [prompt, image, last_image, canvas, duration, steps, seed, upsample],
-        [video, report, upsampled],
+        [video, report, upsampled, upsampled_panel],
         api_name="generate",
     )
 

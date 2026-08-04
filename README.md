@@ -38,7 +38,7 @@ exported at all.
 ## AoTI-compiled blocks
 
 With `H3_AOTI=1` the 50 repeated transformer blocks run from a compiled package,
-`diffusers-internal-dev/minimax-h3-aoti:bf16/torch2.11/sm120/dynamic` — a single dynamic-sequence artifact that serves
+[`multimodalart/minimax-h3-aoti`](https://huggingface.co/multimodalart/minimax-h3-aoti)`:bf16/torch2.11/sm120/dynamic` — a single dynamic-sequence artifact that serves
 every canvas, duration and prompt length. It carries no weights (it reads each block's live ones), so patching it in
 is startup CPU work and costs no GPU time.
 
@@ -160,8 +160,11 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 
 ## Secrets
 
-The weights and the conditioner Space are both public, so neither needs a token. `HF_TOKEN` is still read by
-`h3_aoti`, whose compiled-package repository is private — without it, set `H3_AOTI=0`.
+Nothing this Space loads is private any more: the weights are the public
+[`MiniMaxAI/MiniMax-H3`](https://huggingface.co/MiniMaxAI/MiniMax-H3) checkpoint, the compiled AoTI packages are the
+public [`multimodalart/minimax-h3-aoti`](https://huggingface.co/multimodalart/minimax-h3-aoti) model repo, and the
+conditioner is a public Space called without a token — so that round trip runs on the caller's own quota rather than
+this org's. No `HF_TOKEN` is required.
 
 ## Where diffusers comes from
 
