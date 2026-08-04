@@ -177,6 +177,28 @@ def conditioner():
     return Client(CONDITIONER_SPACE)
 
 
+def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False):
+    """Ask the conditioner Space for `prompt_embeds` + `text_token_tags`. Off this Space's GPU time entirely.
+
+    `rewrite_prompt` asks the conditioner to rewrite the request into MiniMax-H3's trained format with its own
+    Qwen3-VL and encode that, handing the rewrite back under the plan's `refined_prompt`. It runs on the conditioner's
+    booking, and this call happens before `_generate` books a card here, so `get_duration` is unaffected.
+    """
+    from gradio_client import handle_file
+    from safetensors import safe_open
+
+    path, plan = conditioner().predict(
+        prompt=prompt,
+        image_path=handle_file(image_path) if image_path else None,
+        last_image_path=handle_file(last_image_path) if last_image_path else None,
+        canvas=canvas,
+        num_frames=num_frames,
+        rewrite_prompt=bool(rewrite_prompt),
+        api_name="/encode",
+    )
+    with safe_open(path, framework="pt") as handle:
+        metadata = handle.metadata()
+        return handle.get_tensor("prompt_embeds"), handle.get_tensor("text_token_tags"), metadata, plan
 
 
 # Fitted on live probes (5 configs spanning canvas, duration and steps; max residual 3.7 s):
