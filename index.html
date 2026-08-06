@@ -351,7 +351,10 @@ $("run").addEventListener("click", async () => {
       upsample: $("upsample").checked,
     });
     const [video, report, refined] = result.data;
-    $("video").src = video.url;
+    // Server mode may return FileData with only `path` populated; resolve those through Gradio's file route.
+    const videoUrl = video.url || (video.path && `${window.location.origin}/gradio_api/file=${video.path}`);
+    if (!videoUrl) throw new Error("the backend returned no video reference");
+    $("video").src = videoUrl;
     $("monitor").classList.remove("hidden-video");
     $("placeholder").style.display = "none";
     $("report").textContent = report;
