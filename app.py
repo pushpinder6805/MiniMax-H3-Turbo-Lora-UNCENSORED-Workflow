@@ -12,7 +12,7 @@ from functools import cache
 # startup rather than on GPU time.
 import spaces
 from fastapi.responses import HTMLResponse
-from gradio import Server
+from gradio import Request, Server
 from gradio.data_classes import FileData
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "MiniMaxAI/MiniMax-H3")
@@ -177,20 +177,31 @@ def _arm_decode_hooks(pipe):
 
 @cache
 def conditioner():
-    """The other half, over the gradio API. `gradio_client` attaches the caller's own ZeroGPU token per call, so the
-    conditioner's booking is billed to whoever asked for the video."""
+    """The other half, over the gradio API. Used only when the caller's token could not be extracted; the booking is
+    then billed to this Space's pod IP and its small shared quota."""
     from gradio_client import Client
 
     return Client(CONDITIONER_SPACE)
 
 
-def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False):
+def conditioner_client(ip_token):
+    """A conditioner client billed to the caller. `LocalContext`-based token forwarding is not reliable in Server
+    mode, so the `x-ip-token` header is extracted from the incoming request and passed explicitly (per the gradio
+    ZeroGPU docs); a per-request Client is cheap next to a 45s encode."""
+    if not ip_token:
+        return conditioner()
+    from gradio_client import Client
+
+    return Client(CONDITIONER_SPACE, headers={"x-ip-token": ip_token})
+
+
+def encode_remote(prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=False, ip_token=None):
     """`/encode` on the conditioner Space: a safetensors file holding `prompt_embeds` + `text_token_tags`, with the
     resolved `height` / `width` / `num_frames` in its metadata, plus the plan. `canvas` is the label."""
     from gradio_client import handle_file
     from safetensors import safe_open
 
-    path, plan = conditioner().predict(
+    path, plan = conditioner_client(ip_token).predict(
         prompt=prompt,
         image_path=handle_file(image_path) if image_path else None,
         last_image_path=handle_file(last_image_path) if last_image_path else None,
@@ -286,7 +297,7 @@ def _fit_keyframe(image_path, current_canvas):
     return image_path, label
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=4, seed=42, upsample=False):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=4, seed=42, upsample=False, ip_token=None):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise Exception(LOAD_ERROR)
@@ -312,7 +323,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
 
     conditioned = time.time()
     prompt_embeds, text_token_tags, metadata, plan = encode_remote(
-        prompt, first, last, canvas, num_frames, rewrite_prompt=upsample
+        prompt, first, last, canvas, num_frames, rewrite_prompt=upsample, ip_token=ip_token
     )
     condition_seconds = time.time() - conditioned
     height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
@@ -362,9 +373,11 @@ app = Server(title="MiniMax-H3 Studio")
 @app.api(name="generate")
 def _generate_api(prompt: str, image_path: FileData | None = None, last_image_path: FileData | None = None,
                   canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 4, seed: float = 42,
-                  upsample: bool = False) -> tuple[FileData, str, str]:
+                  upsample: bool = False, request: Request = None) -> tuple[FileData, str, str]:
     """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt)."""
-    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample)
+    # `request` is injected by the event system, not an API input; its x-ip-token bills the conditioner to the caller.
+    ip_token = request.headers.get("x-ip-token") if request is not None else None
+    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample, ip_token=ip_token)
 
 
 @app.get("/status")
