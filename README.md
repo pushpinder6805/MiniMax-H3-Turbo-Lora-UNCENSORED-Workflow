@@ -47,7 +47,7 @@ callers get the same treatment the old upload event gave.
 ## 4-step Turbo LoRA
 
 The transformer runs with [`larryvrh/MiniMax-H3-Turbo-Lora`](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)
-folded into its bf16 weights at startup (`h3_lora.py`), so the default is **4 sampling steps** instead of 28 
+folded into its bf16 weights at startup (`h3_lora.py`), so the default is **6 sampling steps** instead of 28 
 card's comfort zone at the current checkpoint; 4 is the design point but softer). The fold mirrors the diffusers key
 conversion exactly (fused-QKV thirds, the `SwiGLU` gate/value swap, the shared AdaLN row layout) and happens before
 the AoTI package is patched in, so compiled blocks carry the update too. The low-rank factors stay resident, so the

@@ -302,7 +302,7 @@ def _fit_keyframe(image_path, current_canvas):
     return image_path, label
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=4, seed=42, upsample=False, use_lora=True, ip_token=None):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=6, seed=42, upsample=False, use_lora=True, ip_token=None):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise Exception(LOAD_ERROR)
@@ -379,7 +379,7 @@ app = Server(title="MiniMax-H3 Studio")
 
 @app.api(name="generate")
 def _generate_api(prompt: str, image_path: FileData | None = None, last_image_path: FileData | None = None,
-                  canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 4, seed: float = 42,
+                  canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 6, seed: float = 42,
                   upsample: bool = False, use_lora: bool = True, request: Request = None) -> tuple[FileData, str, str]:
     """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt)."""
     # `request` is injected by the event system, not an API input; its x-ip-token bills the conditioner to the caller.
