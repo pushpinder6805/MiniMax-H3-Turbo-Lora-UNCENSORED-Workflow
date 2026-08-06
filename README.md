@@ -35,6 +35,15 @@ Space is therefore impossible, which is why quantized demos of it run NVFP4 or f
 Besides the quality argument, unquantized weights are the ones AoTI can export; an NVFP4 checkpoint cannot be
 exported at all.
 
+## Studio frontend (gradio.Server)
+
+The UI is a custom single-page studio (`index.html`) served by [`gradio.Server`](https://www.gradio.app/docs/gradio/server):
+`@app.get("/")` serves the page, `@app.api(name="generate")` keeps the request on Gradio's queue (concurrency control,
+SSE, ZeroGPU booking, `gradio_client` compatibility — the API name and signature are unchanged), and the page talks
+to it with the `@gradio/client` JS package. `/status` and `/config` are plain FastAPI routes the page polls for
+readiness and the canvas table. Keyframe cover-crop / canvas fitting moved server-side into `generate`, so API
+callers get the same treatment the old upload event gave.
+
 ## 4-step Turbo LoRA
 
 The transformer runs with [`larryvrh/MiniMax-H3-Turbo-Lora`](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)

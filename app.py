@@ -11,7 +11,9 @@ from functools import cache
 # Before anything that could initialize CUDA: `import spaces` patches `torch.cuda` so the 72 GiB load can happen at
 # startup rather than on GPU time.
 import spaces
-import gradio as gr
+from fastapi.responses import HTMLResponse
+from gradio import Server
+from gradio.data_classes import FileData
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "MiniMaxAI/MiniMax-H3")
 CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
@@ -248,70 +250,9 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=4, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
-    """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
-    if LOAD_ERROR:
-        raise gr.Error(LOAD_ERROR)
-    if PIPE is None:
-        raise gr.Error("The denoiser is still loading.")
-    if not prompt or not prompt.strip():
-        raise gr.Error("MiniMax-H3 always takes a prompt, keyframes or not.")
-
-    from PIL import Image, ImageOps
-
-    from diffusers.utils import encode_video
-
-    num_frames = snap_frames(duration)
-
-    progress(0.0, desc=f"Upsampling the prompt on {CONDITIONER_SPACE} ..." if upsample else f"Conditioning on {CONDITIONER_SPACE} ...")
-    conditioned = time.time()
-    prompt_embeds, text_token_tags, metadata, plan = encode_remote(
-        prompt, image_path, last_image_path, canvas, num_frames, rewrite_prompt=upsample
-    )
-    condition_seconds = time.time() - conditioned
-    height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
-    refined = plan.get("refined_prompt") or ""
-
-    def keyframe(path):
-        # The conditioning latents encoded here have to be of the image the conditioner looked at, which it prepares
-        # exactly this way.
-        return ImageOps.exif_transpose(Image.open(path)).convert("RGB") if path else None
-
-    progress(0.1, desc=f"Denoising {steps} steps at {width}x{height}, {num_frames} frames ...")
-    started = time.time()
-    frames, audio, sampling_rate = _generate(
-        prompt_embeds,
-        text_token_tags,
-        keyframe(image_path),
-        keyframe(last_image_path),
-        height,
-        width,
-        num_frames,
-        steps,
-        seed,
-    )
-    generate_seconds = time.time() - started
-
-    directory = os.path.join(tempfile.gettempdir(), "h3-outputs")
-    os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, f"h3-{int(time.time() * 1000)}.mp4")
-    encode_video(frames, fps=FPS, output_path=path, audio=audio, audio_sample_rate=sampling_rate)
-
-    report = (
-        f"`{width}x{height}`, {num_frames} frames ({num_frames / FPS:.3f} s), {int(steps)} steps · "
-        f"conditioner {condition_seconds:.0f}s ({plan['num_text_tokens']} tokens"
-        f"{', upsampled' if refined else ''}) · "
-        f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
-    )
-    print(f"[gen] {report}", flush=True)
-    return path, report, refined, gr.update(visible=bool(refined))
-
-
 def _fit_keyframe(image_path, current_canvas):
-    """Cover-crop an uploaded keyframe to the closest supported aspect ratio and select that ratio's smallest
-    (fastest) canvas, unless the user already picked a matching ratio."""
-    if not image_path:
-        return gr.update(), gr.update()
+    """Cover-crop an uploaded keyframe to the closest supported aspect ratio and pick that ratio's smallest
+    (fastest) canvas, unless the caller already picked a matching ratio. Returns `(image_path, canvas_label)`."""
     from PIL import Image as _Image
 
     img = _Image.open(image_path)
@@ -330,91 +271,125 @@ def _fit_keyframe(image_path, current_canvas):
         h, w = cur_h, cur_w
 
     target = w / h
-    if abs(img.width / img.height - target) <= 1e-3:
-        return gr.update(), gr.update(value=label)
-    if img.width / img.height > target:
-        new_w = int(img.height * target)
-        left = (img.width - new_w) // 2
-        img = img.crop((left, 0, left + new_w, img.height))
-    else:
-        new_h = int(img.width / target)
-        top = (img.height - new_h) // 2
-        img = img.crop((0, top, img.width, top + new_h))
-    img.save(image_path)
-    return gr.update(value=image_path), gr.update(value=label)
+    if abs(img.width / img.height - target) > 1e-3:
+        if img.width / img.height > target:
+            new_w = int(img.height * target)
+            left = (img.width - new_w) // 2
+            img = img.crop((left, 0, left + new_w, img.height))
+        else:
+            new_h = int(img.width / target)
+            top = (img.height - new_h) // 2
+            img = img.crop((0, top, img.width, top + new_h))
+        img.save(image_path)
+    return image_path, label
+
+
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=4, seed=42, upsample=False):
+    """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
+    if LOAD_ERROR:
+        raise Exception(LOAD_ERROR)
+    if PIPE is None:
+        raise Exception("The denoiser is still loading.")
+    if not prompt or not prompt.strip():
+        raise Exception("MiniMax-H3 always takes a prompt, keyframes or not.")
+
+    from PIL import Image, ImageOps
+
+    from diffusers.utils import encode_video
+
+    # Server mode: keyframes arrive as FileData dicts, and the cover-crop / canvas-fit that used to be an upload
+    # event in the Blocks UI runs here instead, so API callers get the same treatment.
+    first = image_path["path"] if isinstance(image_path, dict) else image_path
+    last = last_image_path["path"] if isinstance(last_image_path, dict) else last_image_path
+    if first:
+        first, canvas = _fit_keyframe(first, canvas)
+    if last:
+        last, canvas = _fit_keyframe(last, canvas)
+
+    num_frames = snap_frames(duration)
+
+    conditioned = time.time()
+    prompt_embeds, text_token_tags, metadata, plan = encode_remote(
+        prompt, first, last, canvas, num_frames, rewrite_prompt=upsample
+    )
+    condition_seconds = time.time() - conditioned
+    height, width, num_frames = (int(metadata[key]) for key in ("height", "width", "num_frames"))
+    refined = plan.get("refined_prompt") or ""
+
+    def keyframe(path):
+        # The conditioning latents encoded here have to be of the image the conditioner looked at, which it prepares
+        # exactly this way.
+        return ImageOps.exif_transpose(Image.open(path)).convert("RGB") if path else None
+
+    started = time.time()
+    frames, audio, sampling_rate = _generate(
+        prompt_embeds,
+        text_token_tags,
+        keyframe(first),
+        keyframe(last),
+        height,
+        width,
+        num_frames,
+        steps,
+        seed,
+    )
+    generate_seconds = time.time() - started
+
+    directory = os.path.join(tempfile.gettempdir(), "h3-outputs")
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"h3-{int(time.time() * 1000)}.mp4")
+    encode_video(frames, fps=FPS, output_path=path, audio=audio, audio_sample_rate=sampling_rate)
+
+    report = (
+        f"{width}x{height} · {num_frames} frames ({num_frames / FPS:.3f} s) · {int(steps)} steps · "
+        f"conditioner {condition_seconds:.0f}s ({plan['num_text_tokens']} tokens"
+        f"{', upsampled' if refined else ''}) · "
+        f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
+    )
+    print(f"[gen] {report}", flush=True)
+    return FileData(path=path), report, refined
+
+
+
+# ======================================================================
+# Server mode: Gradio's API engine (queue, SSE, concurrency, ZeroGPU,
+# gradio_client) under a fully custom studio frontend (index.html).
+# ======================================================================
+app = Server(title="MiniMax-H3 Studio")
+
+
+@app.api(name="generate")
+def _generate_api(prompt: str, image_path: FileData | None = None, last_image_path: FileData | None = None,
+                  canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 4, seed: float = 42,
+                  upsample: bool = False) -> tuple[FileData, str, str]:
+    """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt)."""
+    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample)
+
+
+@app.get("/status")
+def studio_status():
+    """Polled by the frontend: is the denoiser ready, and the human-readable status line."""
+    return {"ready": PIPE is not None and LOAD_ERROR is None, "status": status()}
+
+
+@app.get("/config")
+def studio_config():
+    """The canvas table and slider ranges, so the frontend never hardcodes a label the backend would reject."""
+    return {
+        "canvases": list(CANVASES),
+        "default_canvas": DEFAULT_CANVAS,
+        "min_duration": MIN_UI_DURATION,
+        "max_duration": MAX_UI_DURATION,
+    }
+
+
+@app.get("/", response_class=HTMLResponse)
+def homepage():
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), encoding="utf-8") as f:
+        return f.read()
 
 
 load_models()
 
-INTRO = """# MiniMax-H3
-
-<div align="center">
-  <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener"><strong>[ model ]</strong></a> &nbsp;
-  <a href="https://www.minimax.io/blog/minimax-h3" target="_blank" rel="noopener"><strong>[ blog ]</strong></a> &nbsp;
-  <a href="https://huggingface.co/spaces/multimodalart/minimax-h3-reference" target="_blank" rel="noopener"><strong>[ reference to video ]</strong></a>
-</div>
-
-**MiniMax-H3** is a 33B parameter state of the art video generation model that produces video and a
-fully synchronized soundtrack (ambience, foley, speech).
-"""
-
-CSS = """
-.main.fillable {max-width: 1250px !important}
-.dark .gradio-container { color: var(--body-text-color); }
-"""
-
-with gr.Blocks(title="MiniMax-H3") as demo:
-    gr.Markdown(INTRO)
-
-    with gr.Row():
-        with gr.Column():
-            prompt = gr.Textbox(
-                label="Prompt",
-                lines=3,
-                value="A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot",
-            )
-            upsample = gr.Checkbox(label="Upsample prompt", value=False)
-            with gr.Row():
-                image = gr.Image(label="First frame (optional)", type="filepath")
-                last_image = gr.Image(label="Last frame (optional)", type="filepath")
-            run = gr.Button("Generate", variant="primary")
-            with gr.Accordion("Advanced options", open=False):
-                canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
-                duration = gr.Slider(label="Duration (s)", minimum=MIN_UI_DURATION, maximum=MAX_UI_DURATION, step=1, value=5)
-                steps = gr.Slider(label="Steps", minimum=2, maximum=40, step=1, value=4)
-                seed = gr.Number(label="Seed", value=42, precision=0)
-
-        with gr.Column():
-            video = gr.Video(label="Video + soundtrack")
-            report = gr.Markdown(visible=False)
-            # An output, so it can be revealed only for a request that asked for a rewrite.
-            with gr.Accordion("Upsampled prompt", open=False, visible=False) as upsampled_panel:
-                upsampled = gr.Textbox(show_label=False, lines=8, interactive=False)
-
-    image.upload(_fit_keyframe, [image, canvas], [image, canvas])
-
-    gr.Examples(
-        examples=[
-            ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", None, None, "1344x768 · 16:9 full"],
-            ["A busy night market, neon signs reflecting in puddles, sizzling street food", None, None, "768x1344 · 9:16 full"],
-            ["A cellist playing a slow melody in an empty concert hall", None, None, "768x768 · 1:1 full"],
-            ["The fox looks around, then trots deeper into the forest", "examples/first.png", None, "1344x768 · 16:9 full"],
-            ["A slow seamless camera move from the first view to the last", "examples/first.png", "examples/last.png", "1344x768 · 16:9 full"],
-        ],
-        inputs=[prompt, image, last_image, canvas],
-        outputs=[video, report, upsampled, upsampled_panel],
-        fn=generate,
-        cache_examples=True,
-        cache_mode="lazy",
-    )
-
-    run.click(
-        generate,
-        [prompt, image, last_image, canvas, duration, steps, seed, upsample],
-        [video, report, upsampled, upsampled_panel],
-        api_name="generate",
-    )
-
-
 if __name__ == "__main__":
-    demo.launch(show_error=True, theme=gr.themes.Citrus(), css=CSS)
+    app.launch(show_error=True)

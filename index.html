@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniMax-H3 Studio</title>
+<style>
+  :root {
+    --bg: #0b0d10;
+    --panel: #12151a;
+    --panel-2: #171b21;
+    --edge: #23282f;
+    --edge-hi: #31383f;
+    --text: #e8eaed;
+    --dim: #9aa3ad;
+    --faint: #5c6670;
+    --accent: #f59e0b;
+    --accent-dim: #92610a;
+    --go: #22c55e;
+    --err: #ef4444;
+    --mono: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* ---- top bar ---- */
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 18px; height: 52px; flex: none;
+    background: var(--panel); border-bottom: 1px solid var(--edge);
+  }
+  .logo { font-weight: 700; letter-spacing: .4px; font-size: 15px; }
+  .logo b { color: var(--accent); }
+  .logo span { color: var(--faint); font-weight: 400; margin-left: 8px; font-size: 12px; }
+  header .links { margin-left: auto; display: flex; gap: 14px; align-items: center; }
+  header a { color: var(--dim); text-decoration: none; font-size: 12px; }
+  header a:hover { color: var(--text); }
+  #status-pill {
+    display: flex; align-items: center; gap: 7px;
+    font: 11px var(--mono); color: var(--dim);
+    border: 1px solid var(--edge); border-radius: 99px; padding: 4px 12px;
+    max-width: 46vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex: none; animation: pulse 1.2s infinite; }
+  #status-pill.ready #status-dot { background: var(--go); animation: none; }
+  #status-pill.error #status-dot { background: var(--err); animation: none; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  main { flex: 1; display: flex; min-height: 0; }
+
+  /* ---- control deck ---- */
+  aside {
+    width: 340px; flex: none; overflow-y: auto;
+    background: var(--panel); border-right: 1px solid var(--edge);
+    padding: 16px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .deck-label {
+    font: 10px var(--mono); letter-spacing: 1.5px; color: var(--faint);
+    text-transform: uppercase; margin-bottom: 6px;
+  }
+  textarea, select, input[type=number] {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--edge); border-radius: 8px;
+    padding: 10px 12px; font: 13px/1.5 inherit; resize: vertical;
+  }
+  textarea:focus, select:focus, input:focus { outline: none; border-color: var(--accent-dim); }
+  textarea { min-height: 96px; }
+
+  .dropzone {
+    border: 1.5px dashed var(--edge-hi); border-radius: 8px;
+    min-height: 74px; display: flex; align-items: center; justify-content: center;
+    color: var(--faint); font-size: 12px; cursor: pointer; position: relative;
+    overflow: hidden; text-align: center; padding: 6px; transition: border-color .15s;
+  }
+  .dropzone:hover, .dropzone.drag { border-color: var(--accent); color: var(--dim); }
+  .dropzone img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .dropzone .clear {
+    position: absolute; top: 4px; right: 6px; z-index: 2; color: #fff;
+    background: rgba(0,0,0,.6); border-radius: 4px; padding: 0 6px; font-size: 14px; display: none;
+  }
+  .dropzone.filled .clear { display: block; }
+  .frames-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+  .check { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 13px; cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+
+  details { border: 1px solid var(--edge); border-radius: 8px; background: var(--panel-2); }
+  summary {
+    padding: 9px 12px; cursor: pointer; font: 11px var(--mono);
+    letter-spacing: 1px; color: var(--dim); text-transform: uppercase; user-select: none;
+  }
+  details .body { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 12px; }
+  .slider-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); margin-bottom: 2px; }
+  .slider-row output { font-family: var(--mono); color: var(--text); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+
+  #run {
+    margin-top: auto; border: none; border-radius: 8px; padding: 13px;
+    background: var(--accent); color: #111; font: 700 14px inherit;
+    letter-spacing: .5px; cursor: pointer; transition: filter .15s, opacity .15s;
+  }
+  #run:hover:not(:disabled) { filter: brightness(1.1); }
+  #run:disabled { opacity: .45; cursor: not-allowed; }
+
+  /* ---- stage ---- */
+  section.stage { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .monitor-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    padding: 22px; min-height: 0;
+    background: radial-gradient(ellipse at 50% 40%, #10141a 0%, var(--bg) 75%);
+  }
+  .monitor {
+    position: relative; max-width: 100%; max-height: 100%;
+    border: 1px solid var(--edge-hi); border-radius: 10px; overflow: hidden;
+    background: #000; box-shadow: 0 24px 70px rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .monitor video { display: block; max-width: 100%; max-height: calc(100vh - 220px); }
+  .monitor .placeholder {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px; color: var(--faint);
+    font: 12px var(--mono); letter-spacing: 1px; text-align: center; padding: 20px;
+  }
+  .monitor .placeholder .rec { width: 46px; height: 46px; border: 1.5px solid var(--edge-hi); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; }
+  .monitor .placeholder .rec::after { content: ""; width: 14px; height: 14px; border-radius: 50%; background: var(--edge-hi); }
+  .monitor.hidden-video video { display: none; }
+
+  /* ---- transport / report bar ---- */
+  .transport {
+    flex: none; border-top: 1px solid var(--edge); background: var(--panel);
+    padding: 10px 18px; display: flex; align-items: center; gap: 16px;
+    font: 12px var(--mono); color: var(--dim); min-height: 44px;
+  }
+  #job-state { color: var(--accent); }
+  #job-state.done { color: var(--go); }
+  #job-state.failed { color: var(--err); }
+  #report { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  #elapsed { color: var(--faint); flex: none; }
+
+  #refined-bar {
+    flex: none; display: none; border-top: 1px solid var(--edge);
+    background: var(--panel-2); padding: 10px 18px; font-size: 12px; color: var(--dim);
+    max-height: 110px; overflow-y: auto;
+  }
+  #refined-bar b { color: var(--faint); font: 10px var(--mono); letter-spacing: 1px; text-transform: uppercase; display: block; margin-bottom: 4px; }
+
+  .examples { display: flex; flex-direction: column; gap: 6px; }
+  .examples button {
+    text-align: left; background: var(--panel-2); border: 1px solid var(--edge);
+    color: var(--dim); border-radius: 6px; padding: 7px 10px; font-size: 12px; cursor: pointer;
+  }
+  .examples button:hover { color: var(--text); border-color: var(--edge-hi); }
+
+  @media (max-width: 860px) {
+    main { flex-direction: column; overflow-y: auto; }
+    aside { width: 100%; border-right: none; border-bottom: 1px solid var(--edge); }
+    body { overflow: auto; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">MiniMax-<b>H3</b> Studio<span>video + synchronized soundtrack · 4-step turbo</span></div>
+  <div class="links">
+    <div id="status-pill"><span id="status-dot"></span><span id="status-text">connecting…</span></div>
+    <a href="https://huggingface.co/MiniMaxAI/MiniMax-H3" target="_blank" rel="noopener">model</a>
+    <a href="https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora" target="_blank" rel="noopener">turbo lora</a>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <div>
+      <div class="deck-label">Prompt</div>
+      <textarea id="prompt" spellcheck="false">A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot</textarea>
+    </div>
+    <label class="check"><input type="checkbox" id="upsample"> Upsample prompt</label>
+
+    <div>
+      <div class="deck-label">Keyframes (optional)</div>
+      <div class="frames-row">
+        <div class="dropzone" id="dz-first">First frame<span class="clear">×</span></div>
+        <div class="dropzone" id="dz-last">Last frame<span class="clear">×</span></div>
+      </div>
+    </div>
+
+    <details open>
+      <summary>Shot settings</summary>
+      <div class="body">
+        <div>
+          <div class="deck-label">Canvas</div>
+          <select id="canvas"></select>
+        </div>
+        <div>
+          <div class="slider-row"><span>Duration</span><output id="duration-out">5 s</output></div>
+          <input type="range" id="duration" min="2" max="14" step="1" value="5">
+        </div>
+        <div>
+          <div class="slider-row"><span>Steps</span><output id="steps-out">4</output></div>
+          <input type="range" id="steps" min="2" max="40" step="1" value="4">
+        </div>
+        <div>
+          <div class="deck-label">Seed</div>
+          <input type="number" id="seed" value="42" step="1">
+        </div>
+      </div>
+    </details>
+
+    <div>
+      <div class="deck-label">Examples</div>
+      <div class="examples" id="examples"></div>
+    </div>
+
+    <button id="run">▶&nbsp; Generate</button>
+  </aside>
+
+  <section class="stage">
+    <div class="monitor-wrap">
+      <div class="monitor hidden-video" id="monitor">
+        <video id="video" controls playsinline></video>
+        <div class="placeholder" id="placeholder">
+          <div class="rec"></div>
+          <div>STANDBY — CUT A PROMPT AND ROLL</div>
+        </div>
+      </div>
+    </div>
+    <div id="refined-bar"><b>Upsampled prompt</b><span id="refined"></span></div>
+    <div class="transport">
+      <span id="job-state">IDLE</span>
+      <span id="report"></span>
+      <span id="elapsed"></span>
+    </div>
+  </section>
+</main>
+
+<input type="file" id="file-first" accept="image/*" hidden>
+<input type="file" id="file-last" accept="image/*" hidden>
+
+<script type="module">
+import { Client, handle_file } from "https://cdn.jsdelivr.net/npm/@gradio/client/dist/index.min.js";
+
+const $ = (id) => document.getElementById(id);
+const state = { first: null, last: null, busy: false, timer: null };
+
+/* ---- config + status ---- */
+fetch("/config").then(r => r.json()).then(cfg => {
+  const sel = $("canvas");
+  for (const label of cfg.canvases) {
+    const o = document.createElement("option");
+    o.value = o.textContent = label;
+    if (label === cfg.default_canvas) o.selected = true;
+    sel.appendChild(o);
+  }
+  $("duration").min = cfg.min_duration; $("duration").max = cfg.max_duration;
+});
+
+async function pollStatus() {
+  try {
+    const s = await (await fetch("/status")).json();
+    const pill = $("status-pill");
+    $("status-text").textContent = s.status.replace(/[*`]/g, "");
+    pill.classList.toggle("ready", s.ready);
+    pill.classList.toggle("error", !s.ready && /failed/i.test(s.status));
+    if (s.ready) return;
+  } catch (e) { /* still booting */ }
+  setTimeout(pollStatus, 5000);
+}
+pollStatus();
+
+/* ---- sliders ---- */
+const bind = (id, fmt) => $(id).addEventListener("input", e => $(id + "-out").textContent = fmt(e.target.value));
+bind("duration", v => v + " s");
+bind("steps", v => v);
+
+/* ---- dropzones ---- */
+function wireDropzone(dzId, inputId, key) {
+  const dz = $(dzId), input = $(inputId);
+  const set = (file) => {
+    if (!file) return;
+    state[key] = file;
+    const img = document.createElement("img");
+    img.src = URL.createObjectURL(file);
+    dz.appendChild(img);
+    dz.classList.add("filled");
+  };
+  dz.addEventListener("click", (e) => {
+    if (e.target.classList.contains("clear")) {
+      state[key] = null; dz.classList.remove("filled");
+      dz.querySelector("img")?.remove(); input.value = "";
+    } else input.click();
+  });
+  input.addEventListener("change", () => set(input.files[0]));
+  dz.addEventListener("dragover", e => { e.preventDefault(); dz.classList.add("drag"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("drag"));
+  dz.addEventListener("drop", e => { e.preventDefault(); dz.classList.remove("drag"); set(e.dataTransfer.files[0]); });
+}
+wireDropzone("dz-first", "file-first", "first");
+wireDropzone("dz-last", "file-last", "last");
+
+/* ---- examples ---- */
+const EXAMPLES = [
+  ["A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot", "1344x768 · 16:9 full"],
+  ["A busy night market, neon signs reflecting in puddles, sizzling street food", "768x1344 · 9:16 full"],
+  ["A cellist playing a slow melody in an empty concert hall", "768x768 · 1:1 full"],
+  ["Waves crashing against basalt cliffs at golden hour, gulls crying overhead", "1152x640 · 16:9"],
+];
+for (const [p, c] of EXAMPLES) {
+  const b = document.createElement("button");
+  b.textContent = p.length > 60 ? p.slice(0, 60) + "…" : p;
+  b.title = p;
+  b.onclick = () => { $("prompt").value = p; $("canvas").value = c; };
+  $("examples").appendChild(b);
+}
+
+/* ---- generate ---- */
+const client = await Client.connect(window.location.origin);
+
+function setJob(label, cls) {
+  const el = $("job-state");
+  el.textContent = label; el.className = cls || "";
+}
+
+$("run").addEventListener("click", async () => {
+  if (state.busy) return;
+  const prompt = $("prompt").value.trim();
+  if (!prompt) { setJob("FAILED", "failed"); $("report").textContent = "a prompt is required"; return; }
+
+  state.busy = true;
+  $("run").disabled = true;
+  $("refined-bar").style.display = "none";
+  $("report").textContent = "";
+  setJob("ROLLING", "");
+  const t0 = Date.now();
+  state.timer = setInterval(() => $("elapsed").textContent = ((Date.now() - t0) / 1000).toFixed(0) + "s", 500);
+
+  try {
+    const result = await client.predict("/generate", {
+      prompt,
+      image_path: state.first ? handle_file(state.first) : null,
+      last_image_path: state.last ? handle_file(state.last) : null,
+      canvas: $("canvas").value,
+      duration: Number($("duration").value),
+      steps: Number($("steps").value),
+      seed: Number($("seed").value),
+      upsample: $("upsample").checked,
+    });
+    const [video, report, refined] = result.data;
+    $("video").src = video.url;
+    $("monitor").classList.remove("hidden-video");
+    $("placeholder").style.display = "none";
+    $("report").textContent = report;
+    if (refined) {
+      $("refined").textContent = refined;
+      $("refined-bar").style.display = "block";
+    }
+    setJob("DONE", "done");
+  } catch (e) {
+    setJob("FAILED", "failed");
+    $("report").textContent = (e && e.message) ? e.message.slice(0, 300) : String(e);
+  } finally {
+    clearInterval(state.timer);
+    state.busy = false;
+    $("run").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
