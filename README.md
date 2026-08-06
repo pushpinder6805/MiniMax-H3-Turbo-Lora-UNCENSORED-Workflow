@@ -35,6 +35,15 @@ Space is therefore impossible, which is why quantized demos of it run NVFP4 or f
 Besides the quality argument, unquantized weights are the ones AoTI can export; an NVFP4 checkpoint cannot be
 exported at all.
 
+## 4-step Turbo LoRA
+
+The transformer runs with [`larryvrh/MiniMax-H3-Turbo-Lora`](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)
+folded into its bf16 weights at startup (`h3_lora.py`), so the default is **4 sampling steps** instead of 28 — the
+LoRA's design point. The checkpoint is an early preview: sharper than the base model at 4 steps, but not a finished
+run. The fold mirrors the diffusers key conversion exactly (fused-QKV thirds, the `SwiGLU` gate/value swap, the
+shared AdaLN row layout) and happens before the AoTI package is patched in, so compiled blocks carry the update too.
+`H3_LORA=minimax_h3_turbo_4step_ema.safetensors` picks the smoother time-averaged variant, `H3_LORA=off` disables.
+
 ## AoTI-compiled blocks
 
 With `H3_AOTI=1` the 50 repeated transformer blocks run from a compiled package,
@@ -157,6 +166,8 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 | `H3_ATTENTION` | `_native_cudnn` | cuDNN's fused kernel, 10–20% faster than the SDPA default and needs nothing installed. flash-attention 3 is sm90-only and this pool is sm120. |
 | `H3_GPU_DURATION` | `900` | Seconds per request; the pool applies a 1.5 duration factor. |
 | `H3_GPU_SIZE` | `xlarge` | ZeroGPU allocation size. `large` does not fit. |
+| `H3_LORA` | `minimax_h3_turbo_4step.safetensors` | Turbo LoRA file folded into the transformer at startup. `off` disables. |
+| `H3_LORA_REPO` | `larryvrh/MiniMax-H3-Turbo-Lora` | Hub repo the LoRA is fetched from. |
 
 ## Whose GPU quota pays
 

@@ -73,6 +73,7 @@ PIPE = None
 MANAGER = None
 LOAD_ERROR: str | None = None
 LOADED_IN: float | None = None
+LORA_STATUS: str | None = None
 
 
 def status() -> str:
@@ -84,7 +85,8 @@ def status() -> str:
 
     return (
         f"Ready · transformer + VAEs **bfloat16, unquantized** · placement `{PLACEMENT}` · attention `{ATTENTION}` · "
-        f"{h3_aoti.status()} · loaded in {LOADED_IN:.0f}s · conditioner `{CONDITIONER_SPACE}`"
+        f"{h3_aoti.status()} · {LORA_STATUS or 'no LoRA'} · loaded in {LOADED_IN:.0f}s · "
+        f"conditioner `{CONDITIONER_SPACE}`"
     )
 
 
@@ -96,7 +98,7 @@ def load_models() -> str | None:
     Both autoencoders carry `_keep_in_fp32_modules` over every module and stay float32: a bfloat16 audio VAE decodes
     the soundtrack roughly 20 dB too quiet.
     """
-    global PIPE, MANAGER, LOAD_ERROR, LOADED_IN
+    global PIPE, MANAGER, LOAD_ERROR, LOADED_IN, LORA_STATUS
 
     if PIPE is not None or LOAD_ERROR is not None:
         return LOAD_ERROR
@@ -114,6 +116,15 @@ def load_models() -> str | None:
         print(f"[gen] loading {[c.name for c in blocks.expected_components]} from {MODEL_REPO} ...", flush=True)
         pipe = blocks.init_pipeline(MODEL_REPO, components_manager=manager, collection="h3")
         pipe.load_components(dtype=torch.bfloat16)
+
+        # Fold the 4-step Turbo LoRA into the bf16 weights before AoTI packages the blocks, so the compiled forward
+        # reads weights that already carry the update. `H3_LORA=off` disables.
+        import h3_lora
+
+        LORA_STATUS = h3_lora.apply_lora(pipe.transformer)
+        if LORA_STATUS:
+            print(f"[gen] {LORA_STATUS}", flush=True)
+
         pipe.transformer.set_attention_backend(ATTENTION)
 
         # Still startup, still free: an AoTI package carries no weights and opens its archive lazily inside the GPU
@@ -237,7 +248,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
     return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=28, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=4, seed=42, upsample=False, progress=gr.Progress(track_tqdm=True)):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise gr.Error(LOAD_ERROR)
@@ -370,7 +381,7 @@ with gr.Blocks(title="MiniMax-H3") as demo:
             with gr.Accordion("Advanced options", open=False):
                 canvas = gr.Dropdown(label="Canvas", choices=list(CANVASES), value=DEFAULT_CANVAS)
                 duration = gr.Slider(label="Duration (s)", minimum=MIN_UI_DURATION, maximum=MAX_UI_DURATION, step=1, value=5)
-                steps = gr.Slider(label="Steps", minimum=10, maximum=40, step=1, value=28)
+                steps = gr.Slider(label="Steps", minimum=2, maximum=40, step=1, value=4)
                 seed = gr.Number(label="Seed", value=42, precision=0)
 
         with gr.Column():
