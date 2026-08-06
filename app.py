@@ -224,7 +224,7 @@ _DECODE_BASE, _DECODE_PER_DEFAULT_CANVAS, _DEFAULT_CANVAS_PIXELS = 15, 15, 960 *
 _PLACEMENT_ALLOWANCE, _PAD = 12, 10
 
 
-def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, *a, **k):
+def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, use_lora=True, *a, **k):
     height, width, num_frames, steps = int(height), int(width), int(num_frames), int(steps)
     latent_frames = (num_frames - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK * LATENTS_PER_CHUNK + 2
     patches = (height // 32) * (width // 32)
@@ -235,13 +235,18 @@ def get_duration(prompt_embeds, text_token_tags, image, last_image, height, widt
 
 
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
-def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed):
+def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, use_lora=True):
     """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
 
     Only the three generated outputs come back — a `@spaces.GPU` return crosses a process boundary by pickling, and
     the full `PipelineState` still holds the packed latents, the rotary grid and the row indices on the card.
     """
     import torch
+
+    import h3_lora
+
+    # Fold/unfold the turbo LoRA in place to match the request (a no-op when the state already matches).
+    h3_lora.set_enabled(PIPE.transformer, bool(use_lora))
 
     if PLACEMENT == "lazy":
         PIPE.to("cuda")
@@ -297,7 +302,7 @@ def _fit_keyframe(image_path, current_canvas):
     return image_path, label
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=4, seed=42, upsample=False, ip_token=None):
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=6, seed=42, upsample=False, use_lora=True, ip_token=None):
     """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
     if LOAD_ERROR:
         raise Exception(LOAD_ERROR)
@@ -345,6 +350,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         num_frames,
         steps,
         seed,
+        use_lora,
     )
     generate_seconds = time.time() - started
 
@@ -356,7 +362,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         f"{width}x{height} · {num_frames} frames ({num_frames / FPS:.3f} s) · {int(steps)} steps · "
         f"conditioner {condition_seconds:.0f}s ({plan['num_text_tokens']} tokens"
         f"{', upsampled' if refined else ''}) · "
-        f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · seed {int(seed)}"
+        f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · "
+        f"turbo LoRA {'on' if use_lora else 'off'} · seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
     return FileData(path=path), report, refined
@@ -372,12 +379,12 @@ app = Server(title="MiniMax-H3 Studio")
 
 @app.api(name="generate")
 def _generate_api(prompt: str, image_path: FileData | None = None, last_image_path: FileData | None = None,
-                  canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 4, seed: float = 42,
-                  upsample: bool = False, request: Request = None) -> tuple[FileData, str, str]:
+                  canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 6, seed: float = 42,
+                  upsample: bool = False, use_lora: bool = True, request: Request = None) -> tuple[FileData, str, str]:
     """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt)."""
     # `request` is injected by the event system, not an API input; its x-ip-token bills the conditioner to the caller.
     ip_token = request.headers.get("x-ip-token") if request is not None else None
-    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample, ip_token=ip_token)
+    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample, use_lora, ip_token=ip_token)
 
 
 @app.get("/status")

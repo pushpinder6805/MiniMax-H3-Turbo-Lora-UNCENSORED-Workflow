@@ -27,8 +27,8 @@ import os
 import torch
 
 LORA_REPO = os.environ.get("H3_LORA_REPO", "larryvrh/MiniMax-H3-Turbo-Lora")
-# The trained weights; the `_ema` variant is an immature time-averaged snapshot at this checkpoint. `off` disables.
-LORA_FILE = os.environ.get("H3_LORA", "minimax_h3_turbo_4step.safetensors")
+# The recommended default per the model card: ckpt500, non-EMA (newest, sharpest). `off` disables.
+LORA_FILE = os.environ.get("H3_LORA", "minimax_h3_turbo_4step_ckpt500.safetensors")
 
 
 def _delta_targets(name: str, delta: torch.Tensor, inner_dim: int) -> list[tuple[str, torch.Tensor]]:
@@ -75,14 +75,46 @@ def apply_lora(transformer) -> str | None:
     params = dict(transformer.named_parameters())
 
     folded = 0
+    entries = []
     for name in bases:
         a = lora[f"{name}.lora_A.weight"].float()
         b = lora[f"{name}.lora_B.weight"].float()
         delta = b @ a  # alpha == rank, so the scale is 1
-        for key, converted in _delta_targets(name, delta, inner_dim):
+        targets = _delta_targets(name, delta, inner_dim)
+        for key, converted in targets:
             param = params.get(key)
             if param is None:
                 raise KeyError(f"LoRA target `{key}` (from `{name}`) not found in the transformer")
             param.data = (param.data.float() + converted).to(param.dtype)
             folded += 1
+        entries.append((name, [key for key, _ in targets]))
+
+    # Keep the low-rank factors (~744 MB in bf16) so the fold can be toggled per request: adding/subtracting
+    # B @ A in place round-trips through one bf16 rounding, and the AoTI blocks read the same live storage.
+    transformer._lora_state = {
+        "enabled": True,
+        "inner_dim": inner_dim,
+        "entries": [
+            (name, lora[f"{name}.lora_A.weight"], lora[f"{name}.lora_B.weight"], keys)
+            for name, keys in entries
+        ],
+    }
     return f"LoRA `{LORA_REPO}/{LORA_FILE}` folded into {folded} weights ({len(bases)} modules)"
+
+
+def set_enabled(transformer, enabled: bool) -> bool:
+    """Fold/unfold the LoRA in place. No-op when no LoRA was loaded or the state already matches."""
+    state = getattr(transformer, "_lora_state", None)
+    if state is None or state["enabled"] == enabled:
+        return state["enabled"] if state else False
+    import torch
+
+    sign = 1.0 if enabled else -1.0
+    params = dict(transformer.named_parameters())
+    for name, a, b, keys in state["entries"]:
+        delta = b.to(torch.float32) @ a.to(torch.float32)
+        for key, converted in zip(keys, _delta_targets(name, delta, state["inner_dim"])):
+            param = params[key]
+            param.data = (param.data.float() + sign * converted.to(param.device)).to(param.dtype)
+    state["enabled"] = enabled
+    return enabled

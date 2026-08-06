@@ -180,6 +180,7 @@
       <div class="deck-label">Prompt</div>
       <textarea id="prompt" spellcheck="false">A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot</textarea>
     </div>
+    <label class="check"><input type="checkbox" id="use_lora" checked> Turbo LoRA (fast steps)</label>
     <label class="check"><input type="checkbox" id="upsample"> Upsample prompt</label>
 
     <div>
@@ -202,8 +203,8 @@
           <input type="range" id="duration" min="2" max="14" step="1" value="5">
         </div>
         <div>
-          <div class="slider-row"><span>Steps</span><output id="steps-out">4</output></div>
-          <input type="range" id="steps" min="2" max="40" step="1" value="4">
+          <div class="slider-row"><span>Steps</span><output id="steps-out">6</output></div>
+          <input type="range" id="steps" min="2" max="40" step="1" value="6">
         </div>
         <div>
           <div class="deck-label">Seed</div>
@@ -351,6 +352,7 @@ $("run").addEventListener("click", async () => {
       steps: Number($("steps").value),
       seed: Number($("seed").value),
       upsample: $("upsample").checked,
+      use_lora: $("use_lora").checked,
     });
     let data = result.data;
     // Server mode returns the tuple as ONE Api output: unwrap [[video, report, refined]] too.
