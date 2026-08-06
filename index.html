@@ -142,6 +142,14 @@
   #report { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; }
   #elapsed { color: var(--faint); flex: none; }
 
+  #bar-track {
+    flex: none; width: 180px; height: 6px; border-radius: 3px;
+    background: var(--edge); overflow: hidden; position: relative;
+  }
+  #bar { height: 100%; width: 0%; border-radius: 3px; background: var(--accent); transition: width .4s linear; }
+  #bar.indeterminate { width: 40%; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% { margin-left: -40%; } 100% { margin-left: 100%; } }
+
   #refined-bar {
     flex: none; display: none; border-top: 1px solid var(--edge);
     background: var(--panel-2); padding: 10px 18px; font-size: 12px; color: var(--dim);
@@ -234,6 +242,7 @@
     <div id="refined-bar"><b>Upsampled prompt</b><span id="refined"></span></div>
     <div class="transport">
       <span id="job-state">IDLE</span>
+      <div id="bar-track"><div id="bar"></div></div>
       <span id="report"></span>
       <span id="elapsed"></span>
     </div>
@@ -322,11 +331,18 @@ for (const [p, c] of EXAMPLES) {
 }
 
 /* ---- generate ---- */
-const client = await Client.connect(window.location.origin);
+const client = await Client.connect(window.location.origin, { events: ["data", "status"] });
 
 function setJob(label, cls) {
   const el = $("job-state");
   el.textContent = label; el.className = cls || "";
+}
+
+function setBar(pct) {
+  const bar = $("bar");
+  if (pct === null) { bar.className = "indeterminate"; return; }
+  bar.className = "";
+  bar.style.width = Math.max(0, Math.min(100, pct)) + "%";
 }
 
 $("run").addEventListener("click", async () => {
@@ -343,7 +359,7 @@ $("run").addEventListener("click", async () => {
   state.timer = setInterval(() => $("elapsed").textContent = ((Date.now() - t0) / 1000).toFixed(0) + "s", 500);
 
   try {
-    const result = await client.predict("/generate", {
+    const submission = client.submit("/generate", {
       prompt,
       image_path: state.first ? handle_file(state.first) : null,
       last_image_path: state.last ? handle_file(state.last) : null,
@@ -354,7 +370,27 @@ $("run").addEventListener("click", async () => {
       upsample: $("upsample").checked,
       use_lora: $("use_lora").checked,
     });
-    let data = result.data;
+    let data = null;
+    for await (const msg of submission) {
+      if (msg.type === "status") {
+        if (msg.stage === "pending") {
+          setJob(msg.position != null ? `QUEUED #${msg.position + 1}` : "QUEUED");
+          setBar(null);
+        } else if (msg.stage === "generating") {
+          setJob("ROLLING");
+          // ETA comes from the queue's booking estimate; blend it with our own elapsed timer.
+          if (msg.eta != null && msg.eta > 0) {
+            const elapsed = (Date.now() - t0) / 1000;
+            setBar(100 * elapsed / (elapsed + msg.eta));
+          } else setBar(null);
+        } else if (msg.stage === "error") {
+          throw new Error(msg.message || "generation failed");
+        }
+      } else if (msg.type === "data") {
+        data = msg.data;
+      }
+    }
+    if (!data) throw new Error("the backend returned no data");
     // Server mode returns the tuple as ONE Api output: unwrap [[video, report, refined]] too.
     if (data.length === 1 && Array.isArray(data[0])) data = data[0];
     const [video, report, refined] = data;
@@ -371,8 +407,10 @@ $("run").addEventListener("click", async () => {
       $("refined-bar").style.display = "block";
     }
     setJob("DONE", "done");
+    setBar(100);
   } catch (e) {
     setJob("FAILED", "failed");
+    setBar(0);
     $("report").textContent = (e && e.message) ? e.message.slice(0, 300) : String(e);
   } finally {
     clearInterval(state.timer);

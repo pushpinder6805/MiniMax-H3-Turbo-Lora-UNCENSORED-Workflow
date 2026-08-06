@@ -87,7 +87,7 @@ def apply_lora(transformer) -> str | None:
                 raise KeyError(f"LoRA target `{key}` (from `{name}`) not found in the transformer")
             param.data = (param.data.float() + converted).to(param.dtype)
             folded += 1
-        entries.append((name, [key for key, _ in targets]))
+        entries.append(name)
 
     # Keep the low-rank factors (~744 MB in bf16) so the fold can be toggled per request: adding/subtracting
     # B @ A in place round-trips through one bf16 rounding, and the AoTI blocks read the same live storage.
@@ -95,8 +95,8 @@ def apply_lora(transformer) -> str | None:
         "enabled": True,
         "inner_dim": inner_dim,
         "entries": [
-            (name, lora[f"{name}.lora_A.weight"], lora[f"{name}.lora_B.weight"], keys)
-            for name, keys in entries
+            (name, lora[f"{name}.lora_A.weight"], lora[f"{name}.lora_B.weight"])
+            for name in entries
         ],
     }
     return f"LoRA `{LORA_REPO}/{LORA_FILE}` folded into {folded} weights ({len(bases)} modules)"
@@ -111,9 +111,9 @@ def set_enabled(transformer, enabled: bool) -> bool:
 
     sign = 1.0 if enabled else -1.0
     params = dict(transformer.named_parameters())
-    for name, a, b, keys in state["entries"]:
+    for name, a, b in state["entries"]:
         delta = b.to(torch.float32) @ a.to(torch.float32)
-        for key, converted in zip(keys, _delta_targets(name, delta, state["inner_dim"])):
+        for key, converted in _delta_targets(name, delta, state["inner_dim"]):
             param = params[key]
             param.data = (param.data.float() + sign * converted.to(param.device)).to(param.dtype)
     state["enabled"] = enabled
