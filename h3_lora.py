@@ -27,8 +27,11 @@ import os
 import torch
 
 LORA_REPO = os.environ.get("H3_LORA_REPO", "larryvrh/MiniMax-H3-Turbo-Lora")
-# The recommended default per the model card: ckpt500, non-EMA (newest, sharpest). `off` disables.
-LORA_FILE = os.environ.get("H3_LORA", "minimax_h3_turbo_4step_ckpt500.safetensors")
+# The recommended default per the model card: ckpt850 EMA (final checkpoint of the round, sharp at 4 steps).
+# `off` disables.
+LORA_FILE = os.environ.get("H3_LORA", "minimax_h3_turbo_4step_ema_ckpt850.safetensors")
+# The card's sharpness/artifact dial: >1 against blurry ghosting/smear, <1 against over-sharp grain.
+LORA_STRENGTH = float(os.environ.get("H3_LORA_STRENGTH", "1.0"))
 
 
 def _delta_targets(name: str, delta: torch.Tensor, inner_dim: int) -> list[tuple[str, torch.Tensor]]:
@@ -79,7 +82,7 @@ def apply_lora(transformer) -> str | None:
     for name in bases:
         a = lora[f"{name}.lora_A.weight"].float()
         b = lora[f"{name}.lora_B.weight"].float()
-        delta = b @ a  # alpha == rank, so the scale is 1
+        delta = (b @ a) * LORA_STRENGTH  # alpha == rank, so the base scale is 1
         targets = _delta_targets(name, delta, inner_dim)
         for key, converted in targets:
             param = params.get(key)
@@ -94,12 +97,14 @@ def apply_lora(transformer) -> str | None:
     transformer._lora_state = {
         "enabled": True,
         "inner_dim": inner_dim,
+        "strength": LORA_STRENGTH,
         "entries": [
             (name, lora[f"{name}.lora_A.weight"], lora[f"{name}.lora_B.weight"])
             for name in entries
         ],
     }
-    return f"LoRA `{LORA_REPO}/{LORA_FILE}` folded into {folded} weights ({len(bases)} modules)"
+    strength = "" if LORA_STRENGTH == 1.0 else f" @ strength {LORA_STRENGTH}"
+    return f"LoRA `{LORA_REPO}/{LORA_FILE}`{strength} folded into {folded} weights ({len(bases)} modules)"
 
 
 def set_enabled(transformer, enabled: bool) -> bool:
@@ -109,7 +114,7 @@ def set_enabled(transformer, enabled: bool) -> bool:
         return state["enabled"] if state else False
     import torch
 
-    sign = 1.0 if enabled else -1.0
+    sign = (1.0 if enabled else -1.0) * state.get("strength", 1.0)
     params = dict(transformer.named_parameters())
     for name, a, b in state["entries"]:
         delta = b.to(torch.float32) @ a.to(torch.float32)
