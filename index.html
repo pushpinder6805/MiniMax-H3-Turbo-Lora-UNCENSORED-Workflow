@@ -243,8 +243,6 @@
 <input type="file" id="file-last" accept="image/*" hidden>
 
 <script type="module">
-import { Client, handle_file } from "https://cdn.jsdelivr.net/npm/@gradio/client/dist/index.min.js";
-
 const $ = (id) => document.getElementById(id);
 const state = { first: null, last: null, busy: false, timer: null };
 
@@ -318,8 +316,29 @@ for (const [p, c] of EXAMPLES) {
   $("examples").appendChild(b);
 }
 
-/* ---- generate ---- */
-const client = await Client.connect(window.location.origin);
+/* ---- generate: Gradio's v2 call API directly (POST named payload -> SSE stream).
+   No @gradio/client: its fn_index resolution does not apply to Server mode. ---- */
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append("files", file);
+  const r = await fetch("/gradio_api/upload", { method: "POST", body: fd });
+  if (!r.ok) throw new Error(`upload failed (${r.status})`);
+  const paths = await r.json();
+  return { path: paths[0], orig_name: file.name, meta: { _type: "gradio.FileData" } };
+}
+
+function awaitResult(eventId) {
+  return new Promise((resolve, reject) => {
+    const es = new EventSource(`/gradio_api/call/generate/${eventId}`);
+    es.addEventListener("complete", (e) => { es.close(); resolve(JSON.parse(e.data)); });
+    es.addEventListener("error", (e) => {
+      es.close();
+      let msg = "generation failed";
+      try { const d = JSON.parse(e.data); msg = d.message || d.title || msg; } catch (_) { if (e.data) msg = e.data; }
+      reject(new Error(msg));
+    });
+  });
+}
 
 function setJob(label, cls) {
   const el = $("job-state");
@@ -340,19 +359,29 @@ $("run").addEventListener("click", async () => {
   state.timer = setInterval(() => $("elapsed").textContent = ((Date.now() - t0) / 1000).toFixed(0) + "s", 500);
 
   try {
-    const result = await client.predict("/generate", {
-      prompt,
-      image_path: state.first ? handle_file(state.first) : null,
-      last_image_path: state.last ? handle_file(state.last) : null,
-      canvas: $("canvas").value,
-      duration: Number($("duration").value),
-      steps: Number($("steps").value),
-      seed: Number($("seed").value),
-      upsample: $("upsample").checked,
+    const call = await fetch("/gradio_api/call/v2/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt,
+        image_path: state.first ? await uploadFile(state.first) : null,
+        last_image_path: state.last ? await uploadFile(state.last) : null,
+        canvas: $("canvas").value,
+        duration: Number($("duration").value),
+        steps: Number($("steps").value),
+        seed: Number($("seed").value),
+        upsample: $("upsample").checked,
+      }),
     });
-    const [video, report, refined] = result.data;
-    // Server mode may return FileData with only `path` populated; resolve those through Gradio's file route.
-    const videoUrl = video.url || (video.path && `${window.location.origin}/gradio_api/file=${video.path}`);
+    if (!call.ok) throw new Error(`queue join failed (${call.status})`);
+    const { event_id } = await call.json();
+    let data = await awaitResult(event_id);
+    // Server mode returns the tuple as ONE Api output: unwrap [[video, report, refined]] too.
+    if (data.length === 1 && Array.isArray(data[0])) data = data[0];
+    const [video, report, refined] = data;
+    // FileData may carry only `path`; resolve those through Gradio's file route.
+    const videoUrl = (video && (video.url || (video.path && `/gradio_api/file=${video.path}`)))
+      || (typeof video === "string" && `/gradio_api/file=${video}`);
     if (!videoUrl) throw new Error("the backend returned no video reference");
     $("video").src = videoUrl;
     $("monitor").classList.remove("hidden-video");

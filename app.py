@@ -71,6 +71,8 @@ def lower_duration_floor(seconds: float = MIN_UI_DURATION) -> None:
     MiniMaxH3ModularPipeline.min_duration = property(lambda self: float(seconds))
 
 
+OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "h3-outputs")
+
 PIPE = None
 MANAGER = None
 LOAD_ERROR: str | None = None
@@ -335,9 +337,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     )
     generate_seconds = time.time() - started
 
-    directory = os.path.join(tempfile.gettempdir(), "h3-outputs")
-    os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, f"h3-{int(time.time() * 1000)}.mp4")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    path = os.path.join(OUTPUT_DIR, f"h3-{int(time.time() * 1000)}.mp4")
     encode_video(frames, fps=FPS, output_path=path, audio=audio, audio_sample_rate=sampling_rate)
 
     report = (
@@ -393,4 +394,5 @@ def homepage():
 load_models()
 
 if __name__ == "__main__":
-    app.launch(show_error=True)
+    # allowed_paths: the /gradio_api/file= route only serves whitelisted directories.
+    app.launch(show_error=True, allowed_paths=[OUTPUT_DIR])
