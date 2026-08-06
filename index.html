@@ -165,9 +165,46 @@
   .examples button:hover { color: var(--text); border-color: var(--edge-hi); }
 
   @media (max-width: 860px) {
-    main { flex-direction: column; overflow-y: auto; }
-    aside { width: 100%; border-right: none; border-bottom: 1px solid var(--edge); }
-    body { overflow: auto; }
+    body { height: 100dvh; overflow: hidden; }
+    main { flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+
+    /* Stage first, controls below: the monitor is what a phone user came for. */
+    section.stage { order: -1; flex: none; }
+    .monitor-wrap { padding: 12px; }
+    .monitor video { max-height: 38vh; }
+    .monitor .placeholder { position: static; padding: 42px 16px; }
+
+    aside {
+      width: 100%; flex: none; overflow: visible;
+      border-right: none; border-top: 1px solid var(--edge);
+      padding: 14px 14px 90px; /* room for the sticky run button */
+    }
+    #run {
+      position: sticky; bottom: 12px; z-index: 5;
+      padding: 15px; font-size: 15px;
+      box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    }
+
+    /* Touch targets + kill iOS auto-zoom on focus (needs >=16px). */
+    textarea, select, input[type=number] { font-size: 16px; }
+    .dropzone { min-height: 92px; }
+    .check { padding: 6px 0; }
+    summary { padding: 12px; }
+    input[type=range] { height: 28px; }
+
+    header { padding: 0 12px; gap: 10px; }
+    .logo span { display: none; }
+    #status-pill { max-width: 38vw; padding: 4px 9px; }
+    header .links a { display: none; }
+    header .links #status-pill { display: flex; }
+
+    .transport { flex-wrap: wrap; gap: 8px 12px; padding: 10px 12px; }
+    #bar-track { flex: 1 1 100%; order: -1; width: auto; height: 5px; }
+    #report { white-space: normal; flex: 1 1 60%; font-size: 11px; }
+    #refined-bar { max-height: 80px; }
+  }
+  @media (max-width: 400px) {
+    .frames-row { grid-template-columns: 1fr; }
   }
 </style>
 </head>
