@@ -249,7 +249,7 @@ const $ = (id) => document.getElementById(id);
 const state = { first: null, last: null, busy: false, timer: null };
 
 /* ---- config + status ---- */
-fetch("/config").then(r => r.json()).then(cfg => {
+fetch("/studio-config").then(r => r.json()).then(cfg => {
   const sel = $("canvas");
   for (const label of cfg.canvases) {
     const o = document.createElement("option");

@@ -372,7 +372,8 @@ def studio_status():
     return {"ready": PIPE is not None and LOAD_ERROR is None, "status": status()}
 
 
-@app.get("/config")
+# NB: not `/config` — Gradio's own client-discovery route lives there and shadowing it breaks `@gradio/client`.
+@app.get("/studio-config")
 def studio_config():
     """The canvas table and slider ranges, so the frontend never hardcodes a label the backend would reject."""
     return {
