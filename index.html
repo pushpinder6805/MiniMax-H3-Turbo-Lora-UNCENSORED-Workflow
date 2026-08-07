@@ -225,7 +225,10 @@
       <div class="deck-label">Prompt</div>
       <textarea id="prompt" spellcheck="false">A red fox trotting through a snowy pine forest at dawn, snow crunching underfoot</textarea>
     </div>
-    <label class="check"><input type="checkbox" id="use_lora" checked> Turbo LoRA (fast steps)</label>
+    <div>
+      <div class="deck-label">Turbo LoRA</div>
+      <select id="lora"></select>
+    </div>
     <label class="check"><input type="checkbox" id="upsample"> Upsample prompt</label>
 
     <div>
@@ -307,6 +310,21 @@ fetch("/studio-config").then(r => r.json()).then(cfg => {
     sel.appendChild(o);
   }
   $("duration").min = cfg.min_duration; $("duration").max = cfg.max_duration;
+
+  const loraSel = $("lora");
+  for (const [value, spec] of Object.entries(cfg.loras || { larry: { label: "larry", steps: 6 } })) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = value === "off" ? "off (base model)" : value;
+    o.title = spec.label;
+    if (value === cfg.default_lora) o.selected = true;
+    loraSel.appendChild(o);
+  }
+  // Each LoRA has a design point: suggest it on switch (the slider stays free).
+  loraSel.addEventListener("change", () => {
+    const spec = (cfg.loras || {})[loraSel.value];
+    if (spec && spec.steps) { $("steps").value = spec.steps; $("steps-out").textContent = spec.steps; }
+  });
 });
 
 async function pollStatus() {
@@ -405,7 +423,7 @@ $("run").addEventListener("click", async () => {
       steps: Number($("steps").value),
       seed: Number($("seed").value),
       upsample: $("upsample").checked,
-      use_lora: $("use_lora").checked,
+      lora: $("lora").value,
     });
     let data = null;
     for await (const msg of submission) {

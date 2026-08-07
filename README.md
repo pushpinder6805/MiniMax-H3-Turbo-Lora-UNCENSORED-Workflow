@@ -48,11 +48,12 @@ callers get the same treatment the old upload event gave.
 
 The transformer runs with [`larryvrh/MiniMax-H3-Turbo-Lora`](https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora)
 folded into its bf16 weights at startup (`h3_lora.py`), so the default is **6 sampling steps** instead of 28 
-card's comfort zone at the current checkpoint; 4 is the design point but softer). The fold mirrors the diffusers key
-conversion exactly (fused-QKV thirds, the `SwiGLU` gate/value swap, the shared AdaLN row layout) and happens before
-the AoTI package is patched in, so compiled blocks carry the update too. The low-rank factors stay resident, so the
-**Turbo LoRA checkbox** (or the `use_lora` API parameter) folds/unfolds `lora_B @ lora_A` in place per request —
-off gives the base model at whatever step count you pick. `H3_LORA` selects the file (`off` disables entirely), `H3_LORA_STRENGTH` scales the update (the card's sharpness/artifact dial: >1 against smear, <1 against over-sharp grain).
+card's comfort zone at the current checkpoint; 4 is the design point but softer). The larry fold mirrors the diffusers key
+conversion exactly (fused-QKV thirds, the `SwiGLU` gate/value swap, the shared AdaLN row layout); lightx keys are
+already diffusers-native. Both happen before the AoTI package is patched in, so compiled blocks carry the update too,
+and the low-rank factors stay resident so switching is an in-place unfold/fold through one bf16 rounding.
+`H3_LORA` selects the larry file (`off` skips it), `H3_LIGHTX=off` skips lightx, `H3_LORA_DEFAULT` picks which set
+starts folded, and `H3_LORA_STRENGTH` scales the larry update (the card's sharpness/artifact dial).
 
 ## AoTI-compiled blocks
 
@@ -178,7 +179,9 @@ one-time `PIPE.to("cuda")` is inside the first row's 339 s and does not reappear
 | `H3_GPU_SIZE` | `xlarge` | ZeroGPU allocation size. `large` does not fit. |
 | `H3_LORA` | `minimax_h3_turbo_4step_ema_ckpt850.safetensors` | Turbo LoRA file folded into the transformer at startup. `off` disables. |
 | `H3_LORA_REPO` | `larryvrh/MiniMax-H3-Turbo-Lora` | Hub repo the LoRA is fetched from. |
-| `H3_LORA_STRENGTH` | `1.0` | Scales the folded LoRA delta (sharpness/artifact trade-off). |
+| `H3_LORA_STRENGTH` | `1.0` | Scales the larry LoRA delta (sharpness/artifact trade-off). |
+| `H3_LIGHTX` | `on` | Set to `off` to skip loading the lightx2v LoRA set. |
+| `H3_LORA_DEFAULT` | `larry` | Which loaded LoRA set starts folded (`larry` / `lightx`). |
 
 ## Whose GPU quota pays
 

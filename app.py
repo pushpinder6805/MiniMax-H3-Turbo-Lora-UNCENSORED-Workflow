@@ -224,7 +224,7 @@ _DECODE_BASE, _DECODE_PER_DEFAULT_CANVAS, _DEFAULT_CANVAS_PIXELS = 15, 15, 960 *
 _PLACEMENT_ALLOWANCE, _PAD = 12, 10
 
 
-def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, use_lora=True, *a, **k):
+def get_duration(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, lora="larry", *a, **k):
     height, width, num_frames, steps = int(height), int(width), int(num_frames), int(steps)
     latent_frames = (num_frames - LATENTS_PER_CHUNK) // FRAMES_PER_CHUNK * LATENTS_PER_CHUNK + 2
     patches = (height // 32) * (width // 32)
@@ -235,7 +235,7 @@ def get_duration(prompt_embeds, text_token_tags, image, last_image, height, widt
 
 
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
-def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, use_lora=True):
+def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, lora="larry"):
     """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
 
     Only the three generated outputs come back — a `@spaces.GPU` return crosses a process boundary by pickling, and
@@ -245,8 +245,9 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
 
     import h3_lora
 
-    # Fold/unfold the turbo LoRA in place to match the request (a no-op when the state already matches).
-    h3_lora.set_enabled(PIPE.transformer, bool(use_lora))
+    # Fold the requested LoRA in place (a no-op when the state already matches). AoTI blocks read the same
+    # live storage, so the compiled forward carries the switch too.
+    active_lora = h3_lora.set_active(PIPE.transformer, lora)
 
     if PLACEMENT == "lazy":
         PIPE.to("cuda")
@@ -265,7 +266,7 @@ def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, 
         num_inference_steps=int(steps),
         generator=torch.Generator("cpu").manual_seed(int(seed)),
     )
-    return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate")
+    return state.get("videos")[0], state.get("audio")[0].cpu(), state.get("sampling_rate"), active_lora
 
 
 def _fit_keyframe(image_path, current_canvas):
@@ -302,8 +303,15 @@ def _fit_keyframe(image_path, current_canvas):
     return image_path, label
 
 
-def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=6, seed=42, upsample=False, use_lora=True, ip_token=None):
-    """One request. `upsample` is last and defaults off, so a positional API client that predates it is unaffected."""
+def _resolve_lora(lora, use_lora) -> str:
+    """`lora` (`larry` / `lightx` / `off`) wins; the legacy `use_lora` bool maps onto `larry` / `off`."""
+    if isinstance(lora, str) and lora in ("larry", "lightx", "off"):
+        return lora
+    return "larry" if use_lora else "off"
+
+
+def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVAS, duration=5, steps=6, seed=42, upsample=False, use_lora=True, lora="", ip_token=None):
+    """One request. `upsample`/`use_lora` keep their defaults so a positional API client that predates them is unaffected."""
     if LOAD_ERROR:
         raise Exception(LOAD_ERROR)
     if PIPE is None:
@@ -314,6 +322,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
     from PIL import Image, ImageOps
 
     from diffusers.utils import encode_video
+
+    lora = _resolve_lora(lora, use_lora)
 
     # Server mode: keyframes arrive as FileData dicts, and the cover-crop / canvas-fit that used to be an upload
     # event in the Blocks UI runs here instead, so API callers get the same treatment.
@@ -340,7 +350,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         return ImageOps.exif_transpose(Image.open(path)).convert("RGB") if path else None
 
     started = time.time()
-    frames, audio, sampling_rate = _generate(
+    frames, audio, sampling_rate, active_lora = _generate(
         prompt_embeds,
         text_token_tags,
         keyframe(first),
@@ -350,7 +360,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         num_frames,
         steps,
         seed,
-        use_lora,
+        lora,
     )
     generate_seconds = time.time() - started
 
@@ -363,7 +373,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         f"conditioner {condition_seconds:.0f}s ({plan['num_text_tokens']} tokens"
         f"{', upsampled' if refined else ''}) · "
         f"denoise + decode {generate_seconds:.0f}s ({generate_seconds / int(steps):.1f} s/step) · "
-        f"turbo LoRA {'on' if use_lora else 'off'} · seed {int(seed)}"
+        f"turbo LoRA {active_lora} · seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
     return FileData(path=path), report, refined
@@ -380,11 +390,15 @@ app = Server(title="MiniMax-H3 Studio")
 @app.api(name="generate")
 def _generate_api(prompt: str, image_path: FileData | None = None, last_image_path: FileData | None = None,
                   canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 6, seed: float = 42,
-                  upsample: bool = False, use_lora: bool = True, request: Request = None) -> tuple[FileData, str, str]:
-    """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt)."""
+                  upsample: bool = False, use_lora: bool = True, lora: str = "", request: Request = None) -> tuple[FileData, str, str]:
+    """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt).
+
+    `lora` selects the turbo LoRA: `larry` (default), `lightx`, or `off`. The legacy `use_lora` bool still works
+    when `lora` is empty.
+    """
     # `request` is injected by the event system, not an API input; its x-ip-token bills the conditioner to the caller.
     ip_token = request.headers.get("x-ip-token") if request is not None else None
-    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample, use_lora, ip_token=ip_token)
+    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample, use_lora, lora, ip_token=ip_token)
 
 
 @app.get("/status")
@@ -397,11 +411,24 @@ def studio_status():
 @app.get("/studio-config")
 def studio_config():
     """The canvas table and slider ranges, so the frontend never hardcodes a label the backend would reject."""
+    import h3_lora
+
+    state = getattr(PIPE.transformer, "_lora_state", None) if PIPE is not None else None
+    sets = state["sets"] if state else {}
     return {
         "canvases": list(CANVASES),
         "default_canvas": DEFAULT_CANVAS,
         "min_duration": MIN_UI_DURATION,
         "max_duration": MAX_UI_DURATION,
+        # The LoRA dropdown: value -> {label, suggested steps}.
+        "loras": {
+            **{
+                name: {"label": spec["label"], "steps": {"larry": 6, "lightx": 4}.get(name, 6)}
+                for name, spec in sets.items()
+            },
+            "off": {"label": "off (base model)", "steps": 28},
+        },
+        "default_lora": state["active"] if state else "off",
     }
 
 
