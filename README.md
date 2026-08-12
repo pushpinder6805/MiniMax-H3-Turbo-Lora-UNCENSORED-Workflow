@@ -1,5 +1,5 @@
 ---
-title: MiniMax H3
+title: MiniMax H3 Turbo LoRA
 emoji: 🎬
 colorFrom: purple
 colorTo: indigo
