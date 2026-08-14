@@ -80,6 +80,18 @@ LOADED_IN: float | None = None
 LORA_STATUS: str | None = None
 
 
+def check_prompt(prompt: str) -> None:
+    """The NCII guard, on requests carrying a keyframe — the edit-on-a-real-photo case. It runs before the
+    conditioner call and the denoise booking, so a refused prompt costs no GPU time on either half. The
+    classifier lives in `ncii_guard`'s spawned subprocess — in the main process it kills every GPU worker."""
+    import ncii_guard
+
+    flag = ncii_guard.classify(prompt)
+    if flag["label"] == "ncii":
+        print(f"[guard] prompt refused (ncii {flag['score']:.2f}): {prompt!r}", flush=True)
+        raise Exception("This prompt was flagged by a content filter and wasn't run.")
+
+
 def status() -> str:
     if LOAD_ERROR:
         return LOAD_ERROR
@@ -318,6 +330,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         raise Exception("The denoiser is still loading.")
     if not prompt or not prompt.strip():
         raise Exception("MiniMax-H3 always takes a prompt, keyframes or not.")
+    if image_path or last_image_path:
+        check_prompt(prompt)
 
     from PIL import Image, ImageOps
 
@@ -438,6 +452,9 @@ def homepage():
         return f.read()
 
 
+import ncii_guard
+
+ncii_guard.start()
 load_models()
 
 if __name__ == "__main__":
