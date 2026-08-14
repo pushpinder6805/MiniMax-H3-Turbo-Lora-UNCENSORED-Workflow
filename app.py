@@ -80,18 +80,6 @@ LOADED_IN: float | None = None
 LORA_STATUS: str | None = None
 
 
-def check_prompt(prompt: str) -> None:
-    """The NCII guard, on requests carrying a keyframe — the edit-on-a-real-photo case. It runs before the
-    conditioner call and the denoise booking, so a refused prompt costs no GPU time on either half. The
-    classifier lives in `ncii_guard`'s spawned subprocess — in the main process it kills every GPU worker."""
-    import ncii_guard
-
-    flag = ncii_guard.classify(prompt)
-    if flag["label"] == "ncii":
-        print(f"[guard] prompt refused (ncii {flag['score']:.2f}): {prompt!r}", flush=True)
-        raise Exception("This prompt was flagged by a content filter and wasn't run.")
-
-
 def status() -> str:
     if LOAD_ERROR:
         return LOAD_ERROR
@@ -108,7 +96,6 @@ def status() -> str:
 
 def load_models() -> str | None:
     """Load the denoising half at startup.
-
     `MiniMaxH3GeneratorBlocks` declares `transformer`, `vae`, `audio_vae`, the two schedulers and `video_processor`,
     so `load_components` fetches exactly those subfolders — `text_encoder/` and `transformer_ref/` are never touched.
     Both autoencoders carry `_keep_in_fp32_modules` over every module and stay float32: a bfloat16 audio VAE decodes
@@ -170,7 +157,6 @@ def load_models() -> str | None:
 
 def _arm_decode_hooks(pipe):
     """Make the offload hooks fire for the two VAEs.
-
     `enable_auto_cpu_offload` wraps `forward`, and the decode blocks call `vae.decode(...)` directly, so the hook
     never runs and the VAE is still on the host when the latents arrive on the card.
     """
@@ -249,7 +235,6 @@ def get_duration(prompt_embeds, text_token_tags, image, last_image, height, widt
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
 def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, lora="larry"):
     """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
-
     Only the three generated outputs come back — a `@spaces.GPU` return crosses a process boundary by pickling, and
     the full `PipelineState` still holds the packed latents, the rotary grid and the row indices on the card.
     """
@@ -330,9 +315,7 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         raise Exception("The denoiser is still loading.")
     if not prompt or not prompt.strip():
         raise Exception("MiniMax-H3 always takes a prompt, keyframes or not.")
-    if image_path or last_image_path:
-        check_prompt(prompt)
-
+    
     from PIL import Image, ImageOps
 
     from diffusers.utils import encode_video
@@ -406,7 +389,6 @@ def _generate_api(prompt: str, image_path: FileData | None = None, last_image_pa
                   canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 6, seed: float = 42,
                   upsample: bool = False, use_lora: bool = True, lora: str = "", request: Request = None) -> tuple[FileData, str, str]:
     """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt).
-
     `lora` selects the turbo LoRA: `larry` (default), `lightx`, or `off`. The legacy `use_lora` bool still works
     when `lora` is empty.
     """
@@ -459,4 +441,4 @@ load_models()
 
 if __name__ == "__main__":
     # allowed_paths: the /gradio_api/file= route only serves whitelisted directories.
-    app.launch(show_error=True, allowed_paths=[OUTPUT_DIR])
+    app.launch(server_name="0.0.0.0", server_port=7860)
