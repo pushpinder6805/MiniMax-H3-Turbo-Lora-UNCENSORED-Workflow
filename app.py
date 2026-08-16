@@ -441,4 +441,5 @@ load_models()
 
 if __name__ == "__main__":
     # allowed_paths: the /gradio_api/file= route only serves whitelisted directories.
+    app.launch(show_error=True, allowed_paths=[OUTPUT_DIR])
     app.launch(server_name="0.0.0.0", server_port=7860)
