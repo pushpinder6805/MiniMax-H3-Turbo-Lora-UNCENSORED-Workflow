@@ -41,8 +41,8 @@ LIGHTX_ALPHA = 8
 LARRY_STRENGTH = float(os.environ.get("H3_LORA_STRENGTH", "1.0"))
 DEFAULT_LORA = os.environ.get("H3_LORA_DEFAULT", "larry")
 
-MYSTIC_REPO = "wolfer45/mystic-xxx-zit-v4"
-MYSTIC_FILE = "mystic-xxx-zit-v4.safetensors" 
+MYSTIC_REPO = "lynaNSFW/mysticxxx_MM_H3"
+MYSTIC_FILE = "MysticXXX_MMH3-V4.safetensors" 
 MYSTIC_ALPHA = 8 # Adjust based on the LoRA's rank/alpha ratio
 
 def _larry_targets(name: str, b: torch.Tensor, inner_dim: int) -> list[tuple[str, torch.Tensor]]:
@@ -116,21 +116,25 @@ def _load_mystic() -> dict:
     entries = []
     modules = {}
 
-    # Group lora_A and lora_B matrices by their base module path
+    # Group down-projections, up-projections, and alpha scalars by their base module path
     for key, tensor in lora.items():
-        if key.endswith(".lora_A.weight"):
-            base_module = key.replace(".lora_A.weight", "")
+        if key.endswith(".lora_down.weight"):
+            base_module = key.replace(".lora_down.weight", "")
             modules.setdefault(base_module, {})["A"] = tensor
-        elif key.endswith(".lora_B.weight"):
-            base_module = key.replace(".lora_B.weight", "")
+        elif key.endswith(".lora_up.weight"):
+            base_module = key.replace(".lora_up.weight", "")
             modules.setdefault(base_module, {})["B"] = tensor
+        elif key.endswith(".alpha"):
+            base_module = key.replace(".alpha", "")
+            modules.setdefault(base_module, {})["alpha"] = tensor.item()
 
-    # Map grouped weights to the target architecture
+    # Map grouped weights to the target transformer architecture
     for base_key, weights in modules.items():
         if "A" in weights and "B" in weights:
-            # Adjust the prefix string replacement if your underlying H3 transformer 
-            # uses a different root namespace (e.g. standard diffusers blocks)
-            target_key = base_key.replace("diffusion_model.", "") 
+            # Kohya formats inject a 'lora_unet_' prefix. 
+            # Adjust the regex/replace chain below to map the specific blocks 
+            # (e.g., 'blocks_24_attn') to your underlying H3 transformer state_dict keys.
+            target_key = base_key.replace("lora_unet_", "") 
             
             entries.append({
                 "target": target_key,
@@ -138,12 +142,18 @@ def _load_mystic() -> dict:
                 "lora_B": weights["B"]
             })
 
-    # Dynamically infer the network rank from the lora_B inner dimension to calculate scaling
-    rank = 32
+    # Dynamically infer the network rank from the lora_down outer dimension
+    rank = 16
     if entries:
-        rank = entries[0]["lora_B"].shape[1]
+        rank = entries[0]["lora_A"].shape[0]
 
-    scale = MYSTIC_ALPHA / rank
+    # Extract the embedded alpha from the first valid module, fallback to 1.0 if missing
+    alpha_val = 1.0
+    if modules:
+        first_module_key = list(modules.keys())[0]
+        alpha_val = modules[first_module_key].get("alpha", float(rank))
+
+    scale = alpha_val / rank
 
     return {
         "label": f"{MYSTIC_REPO}/{MYSTIC_FILE}",
