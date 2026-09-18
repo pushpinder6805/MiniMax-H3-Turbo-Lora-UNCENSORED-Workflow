@@ -11,9 +11,7 @@ from functools import cache
 # Before anything that could initialize CUDA: `import spaces` patches `torch.cuda` so the 72 GiB load can happen at
 # startup rather than on GPU time.
 import spaces
-from fastapi.responses import HTMLResponse
-from gradio import Request, Server
-from gradio.data_classes import FileData
+import gradio as gr
 
 MODEL_REPO = os.environ.get("H3_MODEL_REPO", "MiniMaxAI/MiniMax-H3")
 CONDITIONER_SPACE = os.environ.get("H3_CONDITIONER", "multimodalart/qwen3vl-conditioner")
@@ -80,6 +78,18 @@ LOADED_IN: float | None = None
 LORA_STATUS: str | None = None
 
 
+def check_prompt(prompt: str) -> None:
+    """The NCII guard, on requests carrying a keyframe — the edit-on-a-real-photo case. It runs before the
+    conditioner call and the denoise booking, so a refused prompt costs no GPU time on either half. The
+    classifier lives in `ncii_guard`'s spawned subprocess — in the main process it kills every GPU worker."""
+    import ncii_guard
+
+    flag = ncii_guard.classify(prompt)
+    if flag["label"] == "ncii":
+        print(f"[guard] prompt refused (ncii {flag['score']:.2f}): {prompt!r}", flush=True)
+        raise Exception("This prompt was flagged by a content filter and wasn't run.")
+
+
 def status() -> str:
     if LOAD_ERROR:
         return LOAD_ERROR
@@ -96,6 +106,7 @@ def status() -> str:
 
 def load_models() -> str | None:
     """Load the denoising half at startup.
+
     `MiniMaxH3GeneratorBlocks` declares `transformer`, `vae`, `audio_vae`, the two schedulers and `video_processor`,
     so `load_components` fetches exactly those subfolders — `text_encoder/` and `transformer_ref/` are never touched.
     Both autoencoders carry `_keep_in_fp32_modules` over every module and stay float32: a bfloat16 audio VAE decodes
@@ -157,6 +168,7 @@ def load_models() -> str | None:
 
 def _arm_decode_hooks(pipe):
     """Make the offload hooks fire for the two VAEs.
+
     `enable_auto_cpu_offload` wraps `forward`, and the decode blocks call `vae.decode(...)` directly, so the hook
     never runs and the VAE is still on the host when the latents arrive on the card.
     """
@@ -235,6 +247,7 @@ def get_duration(prompt_embeds, text_token_tags, image, last_image, height, widt
 @spaces.GPU(duration=get_duration, size=GPU_SIZE)
 def _generate(prompt_embeds, text_token_tags, image, last_image, height, width, num_frames, steps, seed, lora="larry"):
     """The only thing on GPU time: the packed-sequence denoise loop and the two decoders.
+
     Only the three generated outputs come back — a `@spaces.GPU` return crosses a process boundary by pickling, and
     the full `PipelineState` still holds the packed latents, the rotary grid and the row indices on the card.
     """
@@ -315,17 +328,23 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         raise Exception("The denoiser is still loading.")
     if not prompt or not prompt.strip():
         raise Exception("MiniMax-H3 always takes a prompt, keyframes or not.")
-    
+    if image_path or last_image_path:
+        check_prompt(prompt)
+
     from PIL import Image, ImageOps
 
     from diffusers.utils import encode_video
 
     lora = _resolve_lora(lora, use_lora)
 
-    # Server mode: keyframes arrive as FileData dicts, and the cover-crop / canvas-fit that used to be an upload
-    # event in the Blocks UI runs here instead, so API callers get the same treatment.
-    first = image_path["path"] if isinstance(image_path, dict) else image_path
-    last = last_image_path["path"] if isinstance(last_image_path, dict) else last_image_path
+    # Keyframes arrive as FileData-style dicts (workflow canvas), plain paths, or URLs; the cover-crop /
+    # canvas-fit runs here so every caller gets the same treatment.
+    def _as_path(value):
+        if isinstance(value, dict):
+            value = value.get("path") or (value.get("url") or "").removeprefix("/gradio_api/file=")
+        return value or None
+
+    first, last = _as_path(image_path), _as_path(last_image_path)
     if first:
         first, canvas = _fit_keyframe(first, canvas)
     if last:
@@ -373,65 +392,59 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         f"turbo LoRA {active_lora} · seed {int(seed)}"
     )
     print(f"[gen] {report}", flush=True)
-    return FileData(path=path), report, refined
-
+    video = {"path": path, "url": f"/gradio_api/file={path}", "orig_name": os.path.basename(path), "mime_type": "video/mp4"}
+    return video, report, refined
 
 
 # ======================================================================
-# Server mode: Gradio's API engine (queue, SSE, concurrency, ZeroGPU,
-# gradio_client) under a fully custom studio frontend (index.html).
+# Workflow mode: a gr.Workflow canvas (workflow.json) whose single fn
+# operator calls `generate_video` below — the same pipeline the old
+# custom studio drove, now as a node visitors can rewire.
 # ======================================================================
-app = Server(title="MiniMax-H3 Studio")
+def _caller_ip_token() -> str | None:
+    """The visitor's x-ip-token, so the conditioner booking is billed to them rather than this Space's pod IP.
 
-
-@app.api(name="generate")
-def _generate_api(prompt: str, image_path: FileData | None = None, last_image_path: FileData | None = None,
-                  canvas: str = DEFAULT_CANVAS, duration: float = 5, steps: int = 6, seed: float = 42,
-                  upsample: bool = False, use_lora: bool = True, lora: str = "", request: Request = None) -> tuple[FileData, str, str]:
-    """Generate a video with a synchronized soundtrack. Returns (video, report, refined prompt).
-    `lora` selects the turbo LoRA: `larry` (default), `lightx`, or `off`. The legacy `use_lora` bool still works
-    when `lora` is empty.
+    Workflow fn nodes run inside Gradio's request context, so `LocalContext` carries the incoming request; when it
+    does not (API calls without the header), the shared client falls back to the pod's quota.
     """
-    # `request` is injected by the event system, not an API input; its x-ip-token bills the conditioner to the caller.
-    ip_token = request.headers.get("x-ip-token") if request is not None else None
-    return generate(prompt, image_path, last_image_path, canvas, duration, steps, seed, upsample, use_lora, lora, ip_token=ip_token)
+    from gradio.context import LocalContext
+
+    request = LocalContext.request.get()
+    return request.headers.get("x-ip-token") if request is not None else None
 
 
-@app.get("/status")
-def studio_status():
-    """Polled by the frontend: is the denoiser ready, and the human-readable status line."""
-    return {"ready": PIPE is not None and LOAD_ERROR is None, "status": status()}
+def generate_video(prompt: str, first_frame=None, last_frame=None, canvas: str = DEFAULT_CANVAS,
+                   duration: float = 5, steps: float = 6, seed: float = 42, upsample: bool = False,
+                   lora: str = "larry"):
+    """The workflow's `generate_video` fn operator. Returns (video file dict, report, refined prompt).
+
+    `lora` selects the turbo LoRA: `larry` (default), `lightx`, or `off`.
+    """
+    if LOAD_ERROR:
+        raise gr.Error(LOAD_ERROR.replace("**", "").replace("`", ""))
+    if PIPE is None:
+        raise gr.Error("The denoiser is still loading — watch the Space logs and retry shortly.")
+    if not prompt or not str(prompt).strip():
+        raise gr.Error("MiniMax-H3 always takes a prompt, keyframes or not.")
+    try:
+        return generate(str(prompt), first_frame, last_frame, canvas, float(duration), int(steps), float(seed),
+                        bool(upsample), lora=str(lora or "larry"), ip_token=_caller_ip_token())
+    except gr.Error:
+        raise
+    except Exception as error:
+        message = str(error).lower()
+        if any(hint in message for hint in ("gpu limit", "quota", "could not allocate", "too many", "concurrent")):
+            raise gr.Error(
+                "The shared ZeroGPU pool is at capacity right now — not a problem with your inputs or account. "
+                "Wait a minute and retry."
+            ) from error
+        raise
 
 
-# NB: not `/config` — Gradio's own client-discovery route lives there and shadowing it breaks `@gradio/client`.
-@app.get("/studio-config")
-def studio_config():
-    """The canvas table and slider ranges, so the frontend never hardcodes a label the backend would reject."""
-    import h3_lora
-
-    state = getattr(PIPE.transformer, "_lora_state", None) if PIPE is not None else None
-    sets = state["sets"] if state else {}
-    return {
-        "canvases": list(CANVASES),
-        "default_canvas": DEFAULT_CANVAS,
-        "min_duration": MIN_UI_DURATION,
-        "max_duration": MAX_UI_DURATION,
-        # The LoRA dropdown: value -> {label, suggested steps}.
-        "loras": {
-            **{
-                name: {"label": spec["label"], "steps": {"larry": 6, "lightx": 4}.get(name, 6)}
-                for name, spec in sets.items()
-            },
-            "off": {"label": "off (base model)", "steps": 28},
-        },
-        "default_lora": state["active"] if state else "off",
-    }
-
-
-@app.get("/", response_class=HTMLResponse)
-def homepage():
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), encoding="utf-8") as f:
-        return f.read()
+# The graph wires Prompt / First Frame / Last Frame / Canvas / Duration / Steps / Seed / Upsample / LoRA into the
+# operator and out to Output Video / Report / Refined Prompt subjects. Editable by the owner on the canvas when the
+# Space sets `hf_oauth: true`; visitors get a runnable, read-only canvas.
+demo = gr.Workflow(graph="workflow.json", bind={"generate_video": generate_video})
 
 
 import ncii_guard
@@ -441,5 +454,4 @@ load_models()
 
 if __name__ == "__main__":
     # allowed_paths: the /gradio_api/file= route only serves whitelisted directories.
-    app.launch(show_error=True, allowed_paths=[OUTPUT_DIR])
-    app.launch(server_name="0.0.0.0", server_port=7860)
+    demo.launch(show_error=True, allowed_paths=[OUTPUT_DIR])

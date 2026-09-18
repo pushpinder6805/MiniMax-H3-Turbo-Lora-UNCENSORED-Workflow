@@ -1,0 +1,562 @@
+{
+  "schema_version": "2",
+  "name": "MiniMax-H3-Turbo-Lora-UNC",
+  "description": "Joint video + synchronized soundtrack from MiniMax-H3 (unquantized bf16, split deployment) with switchable turbo LoRAs, driven by a gr.Workflow fn-bound @spaces.GPU function.",
+  "runtime": {
+    "default": "client"
+  },
+  "view": {
+    "default": "canvas"
+  },
+  "references": [
+    {
+      "id": "ref_prompt",
+      "label": "Prompt",
+      "role": "reference",
+      "asset_type": "text",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Prompt",
+          "type": "text"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Prompt",
+          "type": "text"
+        }
+      ],
+      "x": 40,
+      "y": 60,
+      "width": 280,
+      "height": 140,
+      "data": {
+        "out": "A corgi in a chef hat flipping a pancake in a sunlit kitchen, sizzling sounds and a cheerful bark, cinematic"
+      }
+    },
+    {
+      "id": "ref_first",
+      "label": "First Frame (optional)",
+      "role": "reference",
+      "asset_type": "image",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Image",
+          "type": "image"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Image",
+          "type": "image"
+        }
+      ],
+      "x": 40,
+      "y": 230,
+      "width": 220,
+      "height": 120,
+      "data": {}
+    },
+    {
+      "id": "ref_last",
+      "label": "Last Frame (optional)",
+      "role": "reference",
+      "asset_type": "image",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Image",
+          "type": "image"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Image",
+          "type": "image"
+        }
+      ],
+      "x": 40,
+      "y": 370,
+      "width": 220,
+      "height": 120,
+      "data": {}
+    },
+    {
+      "id": "ref_canvas",
+      "label": "Canvas",
+      "role": "reference",
+      "asset_type": "text",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Canvas label",
+          "type": "text"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Canvas",
+          "type": "text",
+          "choices": [
+            "960x544 · 16:9 fast",
+            "1024x576 · 16:9 fast",
+            "1152x640 · 16:9",
+            "1280x704 · 16:9",
+            "1344x768 · 16:9 full",
+            "544x960 · 9:16 fast",
+            "640x1152 · 9:16",
+            "768x1344 · 9:16 full",
+            "544x544 · 1:1 fast",
+            "768x768 · 1:1 full",
+            "768x576 · 4:3 fast",
+            "1024x768 · 4:3 full",
+            "576x768 · 3:4 fast",
+            "768x1024 · 3:4 full",
+            "1152x512 · 21:9 fast",
+            "1536x672 · 21:9 full"
+          ]
+        }
+      ],
+      "x": 40,
+      "y": 520,
+      "width": 220,
+      "height": 90,
+      "data": {
+        "out": "960x544 · 16:9 fast"
+      }
+    },
+    {
+      "id": "ref_duration",
+      "label": "Duration (s)",
+      "role": "reference",
+      "asset_type": "number",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Seconds",
+          "type": "number"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Duration",
+          "type": "number"
+        }
+      ],
+      "x": 40,
+      "y": 630,
+      "width": 200,
+      "height": 90,
+      "data": {
+        "out": 5
+      }
+    },
+    {
+      "id": "ref_steps",
+      "label": "Steps",
+      "role": "reference",
+      "asset_type": "number",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Steps",
+          "type": "number"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Steps",
+          "type": "number",
+          "choices": [
+            4,
+            6,
+            28
+          ]
+        }
+      ],
+      "x": 40,
+      "y": 740,
+      "width": 200,
+      "height": 90,
+      "data": {
+        "out": 6
+      },
+      "steps": null
+    },
+    {
+      "id": "ref_seed",
+      "label": "Seed",
+      "role": "reference",
+      "asset_type": "number",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Seed",
+          "type": "number"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Seed",
+          "type": "number"
+        }
+      ],
+      "x": 40,
+      "y": 850,
+      "width": 200,
+      "height": 90,
+      "data": {
+        "out": 123
+      }
+    },
+    {
+      "id": "ref_upsample",
+      "label": "Upsample Prompt",
+      "role": "reference",
+      "asset_type": "boolean",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Upsample",
+          "type": "boolean"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Upsample",
+          "type": "boolean"
+        }
+      ],
+      "x": 40,
+      "y": 960,
+      "width": 200,
+      "height": 90,
+      "data": {
+        "out": false
+      }
+    },
+    {
+      "id": "ref_lora",
+      "label": "LoRA",
+      "role": "reference",
+      "asset_type": "text",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "LoRA",
+          "type": "text"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "LoRA",
+          "type": "text",
+          "choices": [
+            "larry",
+            "lightx",
+            "off"
+          ]
+        }
+      ],
+      "x": 40,
+      "y": 1070,
+      "width": 260,
+      "height": 90,
+      "data": {
+        "out": "larry"
+      }
+    }
+  ],
+  "operators": [
+    {
+      "id": "op_generate",
+      "label": "generate_video",
+      "role": "operator",
+      "kind": "fn",
+      "source": "fn",
+      "fn": "generate_video",
+      "inputs": [
+        {
+          "id": "in_0",
+          "label": "prompt",
+          "type": "text",
+          "required": true
+        },
+        {
+          "id": "in_1",
+          "label": "first_frame",
+          "type": "image"
+        },
+        {
+          "id": "in_2",
+          "label": "last_frame",
+          "type": "image"
+        },
+        {
+          "id": "in_3",
+          "label": "canvas",
+          "type": "text",
+          "choices": [
+            "960x544 · 16:9 fast",
+            "1024x576 · 16:9 fast",
+            "1152x640 · 16:9",
+            "1280x704 · 16:9",
+            "1344x768 · 16:9 full",
+            "544x960 · 9:16 fast",
+            "640x1152 · 9:16",
+            "768x1344 · 9:16 full",
+            "544x544 · 1:1 fast",
+            "768x768 · 1:1 full",
+            "768x576 · 4:3 fast",
+            "1024x768 · 4:3 full",
+            "576x768 · 3:4 fast",
+            "768x1024 · 3:4 full",
+            "1152x512 · 21:9 fast",
+            "1536x672 · 21:9 full"
+          ]
+        },
+        {
+          "id": "in_4",
+          "label": "duration",
+          "type": "number"
+        },
+        {
+          "id": "in_5",
+          "label": "steps",
+          "type": "number"
+        },
+        {
+          "id": "in_6",
+          "label": "seed",
+          "type": "number"
+        },
+        {
+          "id": "in_7",
+          "label": "upsample",
+          "type": "boolean"
+        },
+        {
+          "id": "in_8",
+          "label": "lora",
+          "type": "text",
+          "choices": [
+            "larry",
+            "lightx",
+            "off"
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out_0",
+          "label": "video",
+          "type": "video",
+          "output_index": 0
+        },
+        {
+          "id": "out_1",
+          "label": "report",
+          "type": "text",
+          "output_index": 1
+        },
+        {
+          "id": "out_2",
+          "label": "refined_prompt",
+          "type": "text",
+          "output_index": 2
+        }
+      ],
+      "x": 460,
+      "y": 420,
+      "width": 300,
+      "height": 300,
+      "data": {}
+    }
+  ],
+  "subjects": [
+    {
+      "id": "sub_video",
+      "label": "Output Video",
+      "role": "subject",
+      "asset_type": "video",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Video",
+          "type": "video"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Video",
+          "type": "video"
+        }
+      ],
+      "x": 880,
+      "y": 380,
+      "width": 280,
+      "height": 160,
+      "data": {}
+    },
+    {
+      "id": "sub_report",
+      "label": "Report",
+      "role": "subject",
+      "asset_type": "text",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Report",
+          "type": "text"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Report",
+          "type": "text"
+        }
+      ],
+      "x": 880,
+      "y": 580,
+      "width": 280,
+      "height": 110,
+      "data": {}
+    },
+    {
+      "id": "sub_refined",
+      "label": "Refined Prompt",
+      "role": "subject",
+      "asset_type": "text",
+      "inputs": [
+        {
+          "id": "in",
+          "label": "Refined prompt",
+          "type": "text"
+        }
+      ],
+      "outputs": [
+        {
+          "id": "out",
+          "label": "Refined prompt",
+          "type": "text"
+        }
+      ],
+      "x": 880,
+      "y": 720,
+      "width": 280,
+      "height": 110,
+      "data": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_prompt",
+      "from_node_id": "ref_prompt",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_0",
+      "type": "text"
+    },
+    {
+      "id": "e_first",
+      "from_node_id": "ref_first",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_1",
+      "type": "image"
+    },
+    {
+      "id": "e_last",
+      "from_node_id": "ref_last",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_2",
+      "type": "image"
+    },
+    {
+      "id": "e_canvas",
+      "from_node_id": "ref_canvas",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_3",
+      "type": "text"
+    },
+    {
+      "id": "e_duration",
+      "from_node_id": "ref_duration",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_4",
+      "type": "number"
+    },
+    {
+      "id": "e_steps",
+      "from_node_id": "ref_steps",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_5",
+      "type": "number"
+    },
+    {
+      "id": "e_seed",
+      "from_node_id": "ref_seed",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_6",
+      "type": "number"
+    },
+    {
+      "id": "e_upsample",
+      "from_node_id": "ref_upsample",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_7",
+      "type": "boolean"
+    },
+    {
+      "id": "e_lora",
+      "from_node_id": "ref_lora",
+      "from_port_id": "out",
+      "to_node_id": "op_generate",
+      "to_port_id": "in_8",
+      "type": "text"
+    },
+    {
+      "id": "e_video_out",
+      "from_node_id": "op_generate",
+      "from_port_id": "out_0",
+      "to_node_id": "sub_video",
+      "to_port_id": "in",
+      "type": "video"
+    },
+    {
+      "id": "e_report_out",
+      "from_node_id": "op_generate",
+      "from_port_id": "out_1",
+      "to_node_id": "sub_report",
+      "to_port_id": "in",
+      "type": "text"
+    },
+    {
+      "id": "e_refined_out",
+      "from_node_id": "op_generate",
+      "from_port_id": "out_2",
+      "to_node_id": "sub_refined",
+      "to_port_id": "in",
+      "type": "text"
+    }
+  ]
+}
