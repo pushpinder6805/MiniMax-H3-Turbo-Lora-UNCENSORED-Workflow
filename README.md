@@ -1,5 +1,5 @@
 ---
-title: MiniMax H3 Turbo LoRA
+title: MiniMax H3 Turbo Lora UNCENSORED Workflow
 emoji: 🎬
 colorFrom: purple
 colorTo: indigo
@@ -7,6 +7,7 @@ sdk: gradio
 sdk_version: 6.28.0
 app_file: app.py
 pinned: true
+hf_oauth: true
 short_description: Video generation with a synchronized soundtrack
 suggested_hardware: zero-a10g
 ---
