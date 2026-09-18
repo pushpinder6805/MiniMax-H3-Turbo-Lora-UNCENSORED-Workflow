@@ -15,7 +15,7 @@ accelerate==1.14.0
 # diffusers pins <2.
 huggingface-hub==1.24.0
 gradio[oauth,mcp]==6.28.0
-spaces==0.51.1
+spaces==0.51.3
 # No `kernels` pin on purpose: the Hub attention backends want `kernels>=0.12.3`, and that version breaks
 # transformers 5.8.0 at import.
 # PyAV muxes the generated soundtrack onto the frames (`encode_video`).
