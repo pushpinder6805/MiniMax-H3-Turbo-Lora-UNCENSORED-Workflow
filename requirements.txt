@@ -14,7 +14,10 @@ transformers==5.8.0
 accelerate==1.14.0
 # diffusers pins <2.
 huggingface-hub==1.24.0
-gradio==6.20.0
+# Gradio tracks main (https://github.com/gradio-app/gradio) via the prebuilt preview wheel — installing from git
+# does not build the frontend assets. a9ce60ae03123ed6374b739d862e62dcae2f451e = refs/heads/main at the time of
+# this PR; re-pin to the new head (and bump `sdk_version` in README.md if the version changed) to move past it.
+gradio @ https://huggingface.co/buckets/gradio/pypi-previews/resolve/a9ce60ae03123ed6374b739d862e62dcae2f451e/gradio-6.25.0-py3-none-any.whl
 spaces==0.51.1
 # No `kernels` pin on purpose: the Hub attention backends want `kernels>=0.12.3`, and that version breaks
 # transformers 5.8.0 at import.
