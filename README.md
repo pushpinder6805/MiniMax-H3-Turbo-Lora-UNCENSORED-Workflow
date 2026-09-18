@@ -8,6 +8,9 @@ sdk_version: 6.28.0
 app_file: app.py
 pinned: true
 hf_oauth: true
+hf_oauth_scopes:
+  - inference-api
+  - write-repos
 short_description: Video generation with a synchronized soundtrack
 suggested_hardware: zero-a10g
 ---

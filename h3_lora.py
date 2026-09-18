@@ -141,7 +141,15 @@ def _load_mystic() -> dict:
     # Dynamically infer the network rank from the lora_B inner dimension to calculate scaling
     rank = 32
     if entries:
-        ra
+        rank = entries[0]["lora_B"].shape[1]
+
+    scale = MYSTIC_ALPHA / rank
+
+    return {
+        "label": f"{MYSTIC_REPO}/{MYSTIC_FILE}",
+        "scale": scale,
+        "entries": entries,
+    }
 
 def _apply(entries, params, sign: float) -> None:
     for key, a, b in entries:
