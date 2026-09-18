@@ -315,7 +315,7 @@ def _fit_keyframe(image_path, current_canvas):
 
 def _resolve_lora(lora, use_lora) -> str:
     """`lora` (`larry` / `lightx` / `off`) wins; the legacy `use_lora` bool maps onto `larry` / `off`."""
-    if isinstance(lora, str) and lora in ("larry", "lightx", "off"):
+    if isinstance(lora, str) and lora in ("larry", "lightx", "mystic", "off"):
         return lora
     return "larry" if use_lora else "off"
 

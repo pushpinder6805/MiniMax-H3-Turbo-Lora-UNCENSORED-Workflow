@@ -41,6 +41,9 @@ LIGHTX_ALPHA = 8
 LARRY_STRENGTH = float(os.environ.get("H3_LORA_STRENGTH", "1.0"))
 DEFAULT_LORA = os.environ.get("H3_LORA_DEFAULT", "larry")
 
+MYSTIC_REPO = "wolfer45/mystic-xxx-zit-v4"
+MYSTIC_FILE = "mystic-xxx-zit-v4.safetensors" 
+MYSTIC_ALPHA = 8 # Adjust based on the LoRA's rank/alpha ratio
 
 def _larry_targets(name: str, b: torch.Tensor, inner_dim: int) -> list[tuple[str, torch.Tensor]]:
     """Map one reference-tree base name and its `lora_B` onto diffusers parameter key + row-transformed B."""
@@ -104,6 +107,41 @@ def _load_lightx() -> dict:
         "entries": entries,
     }
 
+def _load_mystic() -> dict:
+    from huggingface_hub import hf_hub_download
+    from safetensors.torch import load_file
+
+    lora = load_file(hf_hub_download(MYSTIC_REPO, MYSTIC_FILE))
+    
+    entries = []
+    modules = {}
+
+    # Group lora_A and lora_B matrices by their base module path
+    for key, tensor in lora.items():
+        if key.endswith(".lora_A.weight"):
+            base_module = key.replace(".lora_A.weight", "")
+            modules.setdefault(base_module, {})["A"] = tensor
+        elif key.endswith(".lora_B.weight"):
+            base_module = key.replace(".lora_B.weight", "")
+            modules.setdefault(base_module, {})["B"] = tensor
+
+    # Map grouped weights to the target architecture
+    for base_key, weights in modules.items():
+        if "A" in weights and "B" in weights:
+            # Adjust the prefix string replacement if your underlying H3 transformer 
+            # uses a different root namespace (e.g. standard diffusers blocks)
+            target_key = base_key.replace("diffusion_model.", "") 
+            
+            entries.append({
+                "target": target_key,
+                "lora_A": weights["A"],
+                "lora_B": weights["B"]
+            })
+
+    # Dynamically infer the network rank from the lora_B inner dimension to calculate scaling
+    rank = 32
+    if entries:
+        ra
 
 def _apply(entries, params, sign: float) -> None:
     for key, a, b in entries:
@@ -135,6 +173,8 @@ def apply_lora(transformer) -> str | None:
         sets["larry"] = _load_larry(inner_dim)
     if os.environ.get("H3_LIGHTX", "on").lower() not in ("", "off", "none"):
         sets["lightx"] = _load_lightx()
+    if os.environ.get("H3_MYSTIC", "on").lower() not in ("", "off", "none"):
+        sets["mystic"] = _load_mystic()
     if not sets:
         return None
 
