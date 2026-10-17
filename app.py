@@ -328,8 +328,8 @@ def generate(prompt, image_path=None, last_image_path=None, canvas=DEFAULT_CANVA
         raise Exception("The denoiser is still loading.")
     if not prompt or not prompt.strip():
         raise Exception("MiniMax-H3 always takes a prompt, keyframes or not.")
-    # if image_path or last_image_path:
-        # check_prompt(prompt)
+    if image_path or last_image_path:
+        check_prompt(prompt)
 
     from PIL import Image, ImageOps
 
